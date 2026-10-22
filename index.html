@@ -590,8 +590,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-123';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807123;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-124';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807124;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -2261,7 +2261,12 @@ function catParseInv(wb){
     for(let i=0;i<Math.min(grid.length,15);i++){ if((grid[i]||[]).some(c=>_catUpper(c)==='SKU')){hr=i;break;} }
     if(hr<0) continue;
     const H={}; (grid[hr]||[]).forEach((c,ci)=>{ H[_catUpper(c)]=ci; });
-    const cSku=H['SKU'], cW=(H['FULL WEIGHT LBS']!=null?H['FULL WEIGHT LBS']:H['UNIQUE WEIGHT']),
+    // Weight basis: prefer the GROSS (full-precision) columns — they carry the 10th/100th/1000th of a
+    // pound. The "Full Weight Lbs" / "Unique Weight" columns are integer-rounded per roll, so summing
+    // them overstates/rounds the true weight. Fall back to the integer columns only if gross is absent.
+    const cSku=H['SKU'], cW=(H['FULL GROSS WEIGHT LBS']!=null?H['FULL GROSS WEIGHT LBS']
+                            :H['GROSS WEIGHT']!=null?H['GROSS WEIGHT']
+                            :H['FULL WEIGHT LBS']!=null?H['FULL WEIGHT LBS']:H['UNIQUE WEIGHT']),
           cWid=H['WIDTH'], cStat=H['INVENTORY STATUS'], cLoc=H['LOCATION'], cPend=H['PCS PENDING'], cCust=H['CUSTOMER'];
     if(cSku==null) continue;
     out.header=(grid[hr]||[]).map(c=>c==null?'':c);
@@ -2950,6 +2955,36 @@ function catSetDraftDate(id,val){
   db.ref(ROOT+'/catalystDrafts/'+id).update({date:d.date}).catch(()=>{});
   if(state.tab==='cat') renderCatalyst();
 }
+// Discretionary roll top-off: add (+1) or remove (−1) one whole roll of a draft's primary SKU.
+// Lets an operator pull a leftover roll onto a load (or back it off) by hand. Guide ceiling is
+// 44,500 lb — going over just asks for confirmation; it never hard-blocks (operator's discretion).
+const CAT_ROLL_GUIDE_LB = 44500;
+function catDraftRoll(id, dir){
+  if(!requireAdmin()) return;
+  const d=(state.catDrafts||{})[id]; if(!d){ return; }
+  const alloc=d.alloc||[];
+  const lbEntries=alloc.filter(a=>_catUpper(a.unit)!=='PAC');
+  if(!lbEntries.length){ showAlert('This load has no roll-based (LB) line to adjust.'); return; }
+  // Primary = the heaviest LB line on the load.
+  const primary=lbEntries.slice().sort((a,b)=>_catNum(b.weight)-_catNum(a.weight))[0];
+  const sku=primary.sku; const pw=_catPackWt(sku)||0;
+  if(pw<=0){ showAlert('No pack weight on file for SKU '+sku+' — can\'t size a roll.'); return; }
+  const rollLb=Math.round(pw);
+  const curTot=_catNum(d.totalLb)||alloc.reduce((s,a)=>s+_catNum(a.weight),0);
+  if(dir>0){
+    const newTot=curTot+rollLb;
+    if(newTot>CAT_ROLL_GUIDE_LB && !window.confirm('Adding one roll (~'+rollLb.toLocaleString()+' lb) brings this load to '+newTot.toLocaleString()+' lb, over the '+CAT_ROLL_GUIDE_LB.toLocaleString()+' lb guide. Add it anyway?')) return;
+    primary.weight=_catNum(primary.weight)+rollLb;
+  } else {
+    // Don't remove the load's last roll of the primary.
+    if(_catNum(primary.weight)-rollLb < rollLb*0.5){ showAlert('Can\'t remove the last roll of '+sku+' — discard the load instead.'); return; }
+    primary.weight=Math.max(0, _catNum(primary.weight)-rollLb);
+  }
+  d.totalLb=alloc.reduce((s,a)=>s+_catNum(a.weight),0);
+  db.ref(ROOT+'/catalystDrafts/'+id).update({ alloc, totalLb:d.totalLb })
+    .then(()=>{ if(state.tab==='cat') renderCatalyst(); })
+    .catch(e=>showAlert('Could not adjust the load: '+((e&&e.message)||e)));
+}
 // Change the load date (reqDate) on a single POSTED (on-calendar) load.
 function catSetPostedDate(id,val){
   if(!requireAdmin()) return;
@@ -3163,6 +3198,9 @@ function renderCatalyst(){
         ? `<button class="btn" style="font-size:11px;padding:2px 8px;color:var(--danger)" title="Discard this draft" onclick="catDiscardDraft('${esc(it.key)}')">✕</button>` : '';
       const navBtn=(it.kind==='ext')
         ? `<button class="btn" style="font-size:10px;padding:3px 10px;background:#1a3a6b;color:#fff;border-color:#1a3a6b;white-space:nowrap" title="Open this load on the Outbound tab" onclick="catGoToOutbound('${esc(ordNo).replace(/'/g,"\\'")}')">↗ Outbound</button>` : '';
+      // Discretionary roll top-off: add/remove one whole roll of leftover inventory to this draft (guide ceiling 44,500 lb).
+      const rollBtn=(it.kind==='draft' && admin)
+        ? `<span style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap" title="Add or remove one whole roll of this load's primary SKU (use up leftover inventory at your discretion — guide ceiling ${CAT_ROLL_GUIDE_LB.toLocaleString()} lb)"><button class="btn" style="font-size:12px;padding:2px 8px;line-height:1" onclick="catDraftRoll('${esc(it.key)}',-1)" title="Remove one roll">− roll</button><button class="btn" style="font-size:12px;padding:2px 9px;line-height:1;background:#0f766e;color:#fff;border-color:#0f766e" onclick="catDraftRoll('${esc(it.key)}',1)" title="Add one leftover roll">+ roll</button></span>` : '';
       // Reserved-inventory line: estimated on-hand inventory set aside for this Order-Received load.
       const rsvLine = (it.kind==='ext' && !it.canc && (it.rsvComp || it.rsvOver))
         ? (it.rsvOver
@@ -3176,7 +3214,7 @@ function renderCatalyst(){
             <span style="white-space:nowrap">🚚 <b style="${it.canc?'text-decoration:line-through':''}">${esc(it.id)}</b></span>
             <span style="color:var(--text2)">${(it.pk||it.lb)?('&middot; '+(it.pk||0).toLocaleString()+' pk &middot; '+it.lb.toLocaleString()+' lb'):''}${it.comp?(' &middot; '+it.comp):''}</span>
             <span style="font-size:9px;font-weight:800;letter-spacing:.3px;padding:1px 7px;border-radius:999px;background:${it.bBg};color:${it.bCol};white-space:nowrap">${esc(it.bTxt)}</span>
-            <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">${dateCtl}${postBtn}${delBtn}${navBtn}</span>
+            <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">${rollBtn}${dateCtl}${postBtn}${delBtn}${navBtn}</span>
           </div>${rsvLine}
         </td></tr>`;
     }).join('');
