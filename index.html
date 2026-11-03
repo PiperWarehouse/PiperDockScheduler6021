@@ -32,6 +32,10 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/9.23.0/firebase-app-compat.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/9.23.0/firebase-database-compat.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>var XLSX_COMMUNITY = window.XLSX;</script>
+<!-- style-capable SheetJS fork (same 0.18.x API) — kept isolated so only the Rail export uses styles; window.XLSX stays the community build for every other import/export. -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script>var XLSXStyle = window.XLSX; window.XLSX = XLSX_COMMUNITY;</script>
 <style>
 :root {
   --bg:       #f0f2f7;
@@ -90,6 +94,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .nav-tab.active-ig { color:#b45309;border-bottom-color:#b45309; }
 .nav-tab.active-domtar { color:#166534;border-bottom-color:#166534; }
 .nav-tab.active-cat { color:#be123c;border-bottom-color:#be123c; }
+.nav-tab.active-rail { color:#0369a1;border-bottom-color:#0369a1; }
 .cat-drop{ border:2px dashed var(--border);border-radius:10px;padding:20px 14px;text-align:center;cursor:pointer;background:var(--surface2);transition:border-color .15s, background .15s;margin-bottom:12px; }
 .cat-drop:hover{ border-color:#be123c; }
 .cat-drop.over{ border-color:#be123c;background:rgba(190,18,60,.07); }
@@ -543,6 +548,7 @@ tr.priority-row > td:first-child { box-shadow:inset 3px 0 0 var(--danger); }
     <button class="nav-tab" id="tab-ob" onclick="switchTab('ob')">📤 Outbound<span id="badge-ob" class="badge-count badge-ob"></span></button>
     <button class="nav-tab" id="tab-yd" onclick="switchTab('yd')">🏗 Yard Manager</button>
     <button class="nav-tab" id="tab-sc" onclick="switchTab('sc')">📊 Scorecard</button>
+    <button class="nav-tab" id="tab-rail" onclick="switchTab('rail')">🚆 Rail</button>
     <button class="nav-tab" id="tab-sd" onclick="switchTab('sd')">📋 WRK SHIPDUE</button>
     <button class="nav-tab" id="tab-cat" onclick="switchTab('cat')">🧾 CATALYST</button>
     <button class="nav-tab" id="tab-ff" onclick="switchTab('ff')">🚚 First Fleet</button>
@@ -562,6 +568,7 @@ tr.priority-row > td:first-child { box-shadow:inset 3px 0 0 var(--danger); }
     <div id="view-pwd" style="display:none"></div>
     <div id="view-domtar" style="display:none"></div>
     <div id="view-ig" style="display:none"></div>
+    <div id="view-rail" style="display:none"></div>
   </div>
   <button id="mvt" type="button" onclick="toggleMobileCards()" aria-label="Switch between card and table view">▤ Card view</button>
 </div>
@@ -590,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-124';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807124;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-148';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807148;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -607,6 +614,10 @@ const state = {
   firstfleet: {},
   refTable: {},
   fftiCustomers: [],
+  railReports: {},
+  railArchive: {},
+  railViewDate: null,
+  railStatusOverride: {},
   outbound: {},
   yard: {},
   users: [],
@@ -2126,6 +2137,19 @@ function startListeners() {
     if (state.tab==='ib') renderInbound();
     else if (state.tab==='ob') renderOutbound();
     else if (state.tab==='sc') scDeferRender();   // customer→group mapping decides which loads roll into the scorecard groups
+    else if (state.tab==='rail') renderRail();     // commodity/status maps live on the same table
+  });
+  db.ref(ROOT+'/railReports').on('value', snap => {
+    state.railReports = snap.val()||{};
+    if (state.tab==='rail') renderRail();
+  });
+  db.ref(ROOT+'/railArchive').on('value', snap => {
+    state.railArchive = snap.val()||{};
+    if (state.tab==='rail') renderRail();
+  });
+  db.ref(ROOT+'/railStatusOverride').on('value', snap => {
+    state.railStatusOverride = snap.val()||{};
+    if (state.tab==='rail') renderRail();
   });
   db.ref(ROOT+'/fftiCustomers').on('value', snap => {
     state.fftiCustomers = snap.val()||[];
@@ -3939,14 +3963,447 @@ function exportViewToExcel(viewId, label){
 
 const _tabScroll={};
 function _viewScroller(tab){ const v=document.getElementById('view-'+tab); if(!v) return null; return v.querySelector('.data-scroll, .sc-wrap, .schedule-wrap, .sd-wrap, .yard-scroll') || v; }
+// ═══════════════════════════════════════════════════════════════════════════
+// RAIL — cross-reference 3 daily rail reports into one placement view.
+// Drag & drop the 3 reports (Equipment List, Placement/Export, Pipeline) onto the tab.
+// Cars are matched across reports by number (spaces/punctuation ignored). The commodity map
+// (COMMODITY→CUSTOMER→WAREHOUSE) deciphers the real customer + which warehouse the car belongs to;
+// cars for another warehouse are dropped. The status map (DATA STATUS→REPORT STATUS) turns each
+// report's raw event into one of the 5 buckets, and a car keeps its MOST-ADVANCED status across
+// all 3 reports. Both maps are maintained on the "Update Table" sheet — no separate import.
+// ═══════════════════════════════════════════════════════════════════════════
+const RAIL_WAREHOUSE = '6021';
+const RAIL_BUCKETS = ['ACTUALLY PLACED','ORDERED','CONSTRUCTIVELY PLACED','IN TRANSIT'];   // RELEASED excluded from the Rail view
+const RAIL_RANK = { 'RELEASED':5, 'ACTUALLY PLACED':4, 'CONSTRUCTIVELY PLACED':3, 'ORDERED':2, 'IN TRANSIT':1 };
+const RAIL_TYPE_LABEL = { equip:'CSX Report', placement:'Omni Report', pipeline:'WRK QTS Report' };
+// Fallback maps (match the Rail_Car_Commodity sheet) — used until an Update Table import sets them live.
+const RAIL_DEFAULT_COMMODITY = [
+  { commodity:'BEVERAGE FRUIT',   customer:'ELECTROLIT',       warehouse:'6049' },
+  { commodity:'BEVERAGE,FLVD',    customer:'ELECTROLIT',       warehouse:'6049' },
+  { commodity:'GYPSUM GROUND',    customer:'MAXXON',           warehouse:'6049' },
+  { commodity:'PAPER GRND WOOD',  customer:'CATALYST',         warehouse:'6021' },
+  { commodity:'PLPBDFBD N CORR',  customer:'SMURFIT WESTROCK', warehouse:'6021' },
+  { commodity:'WOODPULP',         customer:'DOMTAR',           warehouse:'6021' }
+];
+const RAIL_DEFAULT_STATUS = [
+  { data:'OB', report:'RELEASED' }, { data:'PL', report:'ORDERED' }, { data:'CP', report:'CONSTRUCTIVELY PLACED' },
+  { data:'AP', report:'ACTUALLY PLACED' }, { data:'BLANK/ENROUTE/OFFLINE', report:'IN TRANSIT' }
+];
+function railNormCar(s){ return String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,''); }
+function railNormCom(s){ return String(s==null?'':s).toUpperCase().replace(/\s+/g,' ').trim(); }
+function railFmtTime(ts){ try{ return new Date(ts).toLocaleString([], {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } }
+// Commodity-fixed origins — these commodities always ship from a known plant, so force the origin.
+const RAIL_COMMODITY_ORIGIN = { 'BEVERAGE,FLVD':'LA JUNTA', 'BEVERAGE FLVD':'LA JUNTA', 'BEVERAGE FRUIT':'WACO' };
+// Shipper -> customer fallback for cars with no commodity (e.g. WRK QTS pipeline cars, which carry a
+// Shipper but no commodity). WestRock variants -> SMURFIT WESTROCK. Warehouse is read from the commodity
+// map by that customer, so it follows whatever the maps say.
+const RAIL_SHIPPER_ALIAS = [
+  { kw:'WESTROCK', customer:'SMURFIT WESTROCK' }, { kw:'SMURFIT', customer:'SMURFIT WESTROCK' },
+  { kw:'DOMTAR', customer:'DOMTAR' }, { kw:'ELECTROLIT', customer:'ELECTROLIT' }, { kw:'LOGINTEL', customer:'ELECTROLIT' },
+  { kw:'EMPIRE MINING', customer:'MAXXON' }, { kw:'MAXXON', customer:'MAXXON' }, { kw:'CATALYST', customer:'CATALYST' }
+];
+function railShipperCM(shipper, comMap){
+  const sh=String(shipper||'').toUpperCase(); if(!sh) return null;
+  const hit=RAIL_SHIPPER_ALIAS.find(a=>sh.indexOf(a.kw)>-1); if(!hit) return null;
+  let wh=''; Object.keys(comMap).forEach(c=>{ if(!wh && comMap[c].customer===hit.customer) wh=comMap[c].warehouse; });
+  return wh ? { customer:hit.customer, warehouse:wh } : null;
+}
+// Default origin by customer — applied ONLY when the reports leave a car's origin blank (never overrides a real one).
+const RAIL_DEFAULT_ORIGIN = { 'CATALYST':'NEW WESTMINSTER, BC' };
+function railCommodityMap(){
+  const src=(state.refTable && Array.isArray(state.refTable.railCommodity) && state.refTable.railCommodity.length) ? state.refTable.railCommodity : RAIL_DEFAULT_COMMODITY;
+  const m={}; src.forEach(x=>{ const c=railNormCom(x.commodity); if(!c) return; m[c]={ customer:String(x.customer||'').toUpperCase().trim(), warehouse:String(x.warehouse||'').trim() }; });
+  return m;
+}
+function railStatusMap(){
+  const src=(state.refTable && Array.isArray(state.refTable.railStatus) && state.refTable.railStatus.length) ? state.refTable.railStatus : RAIL_DEFAULT_STATUS;
+  const m={}; src.forEach(x=>{ const d=String(x.data||'').toUpperCase().trim(); const rep=String(x.report||'').toUpperCase().trim(); if(!rep) return;
+    if(d.indexOf('BLANK')>-1 || d.indexOf('ENROUTE')>-1 || d.indexOf('OFFLINE')>-1 || d===''){ m['']=rep; m['ENROUTE']=rep; m['OFFLINE']=rep; }
+    else m[d]=rep; });
+  if(m['']==null) m['']='IN TRANSIT';
+  if(m['EMPTY']==null) m['EMPTY']='RELEASED';   // a **EMPTY** commodity means the car has been released
+  return m;
+}
+function railDetectType(hdr){
+  if(hdr.indexOf('STCC DESCRIPTION')>-1) return 'equip';
+  if(hdr.indexOf('PLACEMENT STATUS')>-1) return 'placement';
+  if(hdr.indexOf('UNIT ID')>-1 && hdr.indexOf('CLM EVENT')>-1) return 'pipeline';
+  if(hdr.indexOf('COMMODITY')>-1 && hdr.indexOf('TRIP STATUS')>-1) return 'placement';
+  return null;
+}
+// Per-report → a normalized DATA STATUS code (OB/AP/CP/PL/'') that the (editable) status map turns into a bucket.
+function railRowStatusCode(type, g){
+  if(type==='equip'){ const le=(g('LAST EVENT')).toUpperCase();
+    if(le==='PLACED AT INDUSTRY') return 'AP';            // actually placed (keeps precedence)
+    if(le==='CONSTRUCTIVELY PLACED') return 'CP';
+    // Last event located at Fulco, GA (Column Q = Last Event City, R = Last Event State) = constructively placed.
+    const _lc=g('LAST EVENT CITY').toUpperCase().trim(), _ls=g('LAST EVENT STATE').toUpperCase().trim();
+    if(_lc==='FULCO' && _ls==='GA') return 'CP';
+    return ''; }   // everything else (OFFLINE/ENROUTE transit, Waybill Data Reported, etc.) stays IN TRANSIT
+  if(type==='placement'){ const ai=g('AI').toUpperCase().trim();
+    // Column AD ("AI") carries the OB/PL/CP/AP data-status code directly (OB=Released, PL=Ordered, CP=Constructively Placed, AP=Actually Placed).
+    if(ai==='OB'||ai==='PL'||ai==='CP'||ai==='AP') return ai;
+    const ps=g('PLACEMENT STATUS').toUpperCase();
+    return ps==='RELEASED'?'OB' : ps==='ACTUALLY PLACED'?'AP' : ps==='CONSTRUCTIVELY PLACED'?'CP' : ps==='ORDERED'?'PL' : ''; }
+  return '';   // pipeline CLM events are all in-transit movements toward Fulco
+}
+function railParseRows(type, idx, rows){
+  const out=[];
+  const mk=row=>(name=>{ const i=idx[name]; return i==null?'':String(row[i]==null?'':row[i]).trim(); });
+  rows.forEach(row=>{ if(!row || !row.length) return; const g=mk(row);
+    let carRaw, commodity, originCity, originState;
+    if(type==='equip'){ carRaw=g('EQUIPMENT'); commodity=g('STCC DESCRIPTION'); originCity=g('ORIGIN CITY'); originState=g('ORIGIN STATE'); }
+    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
+    else { carRaw=g('UNIT ID'); commodity=''; const og=g('ORIGIN'); const p=og.split(','); originCity=(p[0]||'').trim(); originState=(p[1]||'').trim(); }
+    if(!carRaw) return;
+    const _rawCom=railNormCom(commodity); let com=_rawCom, _ds=railRowStatusCode(type,g);
+    if(_rawCom==='**EMPTY**'||_rawCom==='EMPTY'){ com=''; _ds='EMPTY'; }   // an empty car has been released
+    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim() });
+  });
+  return out;
+}
+async function railReadFile(file){
+  const name=file.name||''; const low=name.toLowerCase(); let wb;
+  if(low.endsWith('.csv')||low.endsWith('.txt')){ const txt=await file.text(); wb=XLSX.read(txt,{type:'string'}); }
+  else { const buf=new Uint8Array(await file.arrayBuffer()); wb=XLSX.read(buf,{type:'array'}); }
+  const info=(wb.Workbook && wb.Workbook.Sheets)||[]; const hidden={};
+  wb.SheetNames.forEach((nm,i)=>{ const h=info[i] && info[i].Hidden; hidden[nm]=!!(h && h>0); });
+  for(const nm of wb.SheetNames){
+    if(hidden[nm]) continue;   // do NOT read hidden tabs
+    const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,raw:false,defval:null,blankrows:false});
+    if(!aoa.length) continue;
+    let hr=-1;
+    for(let i=0;i<Math.min(aoa.length,15);i++){ const up=(aoa[i]||[]).map(c=>String(c==null?'':c).trim().toUpperCase());
+      if(up.indexOf('EQUIPMENT')>-1 || up.indexOf('UNIT ID')>-1){ hr=i; break; } }
+    if(hr<0) continue;
+    const hdr=(aoa[hr]||[]).map(c=>String(c==null?'':c).trim().toUpperCase());
+    const type=railDetectType(hdr); if(!type) continue;
+    const idx={}; hdr.forEach((h,i)=>{ if(h && idx[h]==null) idx[h]=i; });
+    return { type, name, records:railParseRows(type, idx, aoa.slice(hr+1)) };
+  }
+  return { type:null, name, records:[] };
+}
+function railDrop(ev){ ev.preventDefault(); ev.stopPropagation(); try{ ev.currentTarget.classList.remove('rail-over'); }catch(e){}
+  const fs=ev.dataTransfer && ev.dataTransfer.files ? [...ev.dataTransfer.files] : []; if(fs.length) railHandleFiles(fs); }
+async function railHandleFiles(files){
+  if(!(state.user && state.user.role==='admin')){ showAlert('Admin only','warning'); return; }
+  const updates={}, done=[], fail=[];
+  for(const f of files){
+    try{ const res=await railReadFile(f);
+      if(!res.type){ fail.push((f.name||'file')+' — not one of the 3 rail reports'); continue; }
+      updates['/railReports/'+res.type]={ name:res.name, at:Date.now(), by:(state.user&&state.user.label)||'', records:res.records };
+      state.railReports=state.railReports||{}; state.railReports[res.type]=updates['/railReports/'+res.type];
+      done.push(RAIL_TYPE_LABEL[res.type]+' ('+res.records.length+')');
+    }catch(e){ fail.push((f.name||'file')+': '+((e&&e.message)||e)); }
+  }
+  if(Object.keys(updates).length){ try{ await db.ref(ROOT).update(updates); }catch(e){ showAlert('Save failed: '+((e&&e.message)||e),'danger'); return; } }
+  let msg=done.length?('Loaded '+done.join(', ')):''; if(fail.length) msg+=(msg?' · ':'')+'Skipped '+fail.join('; ');
+  // Post the rail totals onto the scorecards for the import date (6021 = all cars, WRK = Smurfit Westrock only).
+  const posted = done.length ? railPostToScorecard() : null;
+  if(done.length) railArchiveMaybe(false);   // freeze today's 9 AM+ snapshot if not already taken
+  if(posted) msg+=' · Scorecard rail updated '+posted.date;
+  showAlert(msg||'Nothing imported', (fail.length && !done.length)?'danger':'success');
+  if(state.tab==='rail') renderRail();
+}
+function railClearReports(){ if(!(state.user&&state.user.role==='admin')) return;
+  if(!window.confirm('Clear all 3 loaded rail reports?')) return;
+  state.railReports={}; db.ref(ROOT+'/railReports').remove().catch(()=>{}); renderRail(); }
+// Push the rail buckets onto BOTH daily scorecards for the import date:
+//   Tot Rail Recv ← Actually Placed · Pend Rail Yard ← Constructively Placed · Rail In Transit ← In Transit
+// 6021 board uses every car on the 6021 view; the Smurfit WRK board uses only SMURFIT WESTROCK cars.
+function railPostToScorecard(){
+  try{
+    const built=railBuild(); const date=todayStr();
+    const agg=(filterFn)=>{ let ap=0,cp=0,it=0; built.rows.forEach(r=>{ if(filterFn && !filterFn(r)) return;
+      ap+=(r.counts['ACTUALLY PLACED']||0); cp+=(r.counts['CONSTRUCTIVELY PLACED']||0); it+=(r.counts['IN TRANSIT']||0); }); return {ap,cp,it}; };
+    const all=agg(null), wrk=agg(r=>r.customer==='SMURFIT WESTROCK');
+    const upd={};
+    upd['/scorecard/'+date+'/railRecv']=all.ap;    upd['/scorecard/'+date+'/pendRail']=all.cp;    upd['/scorecard/'+date+'/railTransit']=all.it;
+    upd['/scorecardWrk/'+date+'/railRecv']=wrk.ap; upd['/scorecardWrk/'+date+'/pendRail']=wrk.cp; upd['/scorecardWrk/'+date+'/railTransit']=wrk.it;
+    db.ref(ROOT).update(upd).catch(e=>console.warn('rail→scorecard save',e));
+    return { date, all, wrk };
+  }catch(e){ console.warn('railPostToScorecard',e); return null; }
+}
+// Cross-reference every loaded report into per-customer/origin counts by status bucket.
+// ── Daily 9:00 AM ET snapshot + archive ──
+// Browser app (no server cron), so the daily snapshot is captured client-side: the first time the
+// tab is open, or a report is imported, at/after 9:00 AM ET, today's view is frozen to
+// /railArchive/<ET date> and is NOT auto-overwritten afterward (so it stays "as of 9 AM"). Use the
+// Snapshot button to refresh it by hand, and the Archive selector to view/export any past day.
+let _railAutoTimer=null;
+function railEtParts(){ try{
+  const o={}; new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date()).forEach(p=>o[p.type]=p.value);
+  return { date:o.year+'-'+o.month+'-'+o.day, hour:parseInt(o.hour,10), minute:parseInt(o.minute,10) };
+}catch(e){ const d=new Date(), p=n=>(n<10?'0':'')+n; return { date:d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()), hour:d.getHours(), minute:d.getMinutes() }; } }
+function railEtStamp(ts){ try{ return new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).format(new Date(ts))+' ET'; }catch(e){ return railFmtTime(ts); } }
+function railArchiveWrite(dateKey, built){
+  built=built||railBuild(); if(!built.rows.length) return null;
+  const rec={ date:dateKey, at:Date.now(), by:(state.user&&state.user.label)||'',
+    rows: built.rows.map(r=>({ customer:r.customer, origin:r.origin, counts:r.counts, cars:r.cars })), mapped:built.mapped };
+  state.railArchive=state.railArchive||{}; state.railArchive[dateKey]=rec;
+  db.ref(ROOT+'/railArchive/'+dateKey).set(rec).catch(e=>console.warn('rail archive save',e));
+  return rec;
+}
+function railArchiveMaybe(force){
+  try{ const et=railEtParts();
+    if(!force){ if(et.hour<9) return null; if(state.railArchive && state.railArchive[et.date]) return null; }
+    return railArchiveWrite(et.date);
+  }catch(e){ console.warn('railArchiveMaybe',e); return null; }
+}
+function railAutoArchive(){ railArchiveMaybe(false); }
+function railArchiveNow(){ if(!(state.user&&state.user.role==='admin')){ showAlert('Admin only','warning'); return; }
+  const et=railEtParts(); const rec=railArchiveWrite(et.date);
+  showAlert(rec?('Snapshot archived for '+et.date):'Nothing to archive yet - load the reports first.', rec?'success':'warning');
+  if(state.tab==='rail') renderRail(); }
+function railViewDateSet(v){ state.railViewDate=v||null; if(state.tab==='rail') renderRail(); }
+function railCurrentBuilt(){
+  const d=state.railViewDate;
+  if(d && state.railArchive && state.railArchive[d]){ const a=state.railArchive[d];
+    const rows=(a.rows||[]).map((r,i)=>({ customer:r.customer, origin:r.origin, counts:r.counts||{}, cars:r.cars||{}, _i:i }));
+    return { rows, mapped:(a.mapped||rows.length), unmapped:0, otherWh:0, archived:true, date:d, at:a.at }; }
+  return railBuild();
+}
+function railBuild(){
+  const slots=state.railReports||{}; const all=[];
+  ['equip','placement','pipeline'].forEach(t=>{ const s=slots[t]; if(s && Array.isArray(s.records)) s.records.forEach(r=>all.push(r)); });
+  const comMap=railCommodityMap(), stMap=railStatusMap();
+  const byCar={}; all.forEach(r=>{ if(!r.car) return; (byCar[r.car]=byCar[r.car]||[]).push(r); });
+  const pivot={}; let mapped=0, unmapped=0, otherWh=0, excludedTransit=0, excludedReleased=0;
+  Object.keys(byCar).forEach(car=>{
+    const recs=byCar[car];
+    let commodity=''; for(const r of recs){ if(r.commodity){ commodity=r.commodity; break; } }
+    let cm = commodity ? comMap[commodity] : null;
+    if(!cm){ let _sh=''; for(const r of recs){ if(r.shipper){ _sh=r.shipper; break; } } cm = railShipperCM(_sh, comMap); }   // WestRock QTS pipeline cars have no commodity — map by shipper
+    if(!cm){ unmapped++; return; }                               // no commodity match → can't decipher, don't apply
+    if(String(cm.warehouse)!==RAIL_WAREHOUSE){ otherWh++; return; }   // deciphered to another warehouse → don't apply
+    let originCity='', originState='';
+    for(const r of recs){ if(r.commodity && r.originCity){ originCity=r.originCity; originState=r.originState; break; } }
+    if(!originCity) for(const r of recs){ if(r.originCity){ originCity=r.originCity; originState=r.originState; break; } }
+    let best='IN TRANSIT', bestRank=1;
+    recs.forEach(r=>{ const b=stMap[String(r.ds||'').toUpperCase()] || stMap['']; const rk=RAIL_RANK[b]||0; if(rk>bestRank){ bestRank=rk; best=b; } });
+    let manual=false; const _ov=state.railStatusOverride && state.railStatusOverride[car];
+    if(_ov && _ov.status && RAIL_RANK[_ov.status]){ best=_ov.status; manual=true; }   // manual override wins (reports lag)
+    if(best==='RELEASED'){ excludedReleased++; return; }   // Released cars are excluded from the Rail view entirely
+    // IN TRANSIT is authoritative only on the CSX Report — a car that is In Transit but not on CSX is excluded.
+    if(best==='IN TRANSIT' && !manual && !recs.some(r=>r.rt==='equip' || r.rt==='pipeline')){ excludedTransit++; return; }   // In Transit valid on CSX or WRK QTS; Omni-only excluded
+    mapped++;
+    let origin=(originCity||'') + (originState?(', '+originState):'');
+    if(RAIL_COMMODITY_ORIGIN[commodity]) origin=RAIL_COMMODITY_ORIGIN[commodity];   // e.g. BEVERAGE,FLVD → LA JUNTA · BEVERAGE FRUIT → WACO
+    if(!origin && RAIL_DEFAULT_ORIGIN[cm.customer]) origin=RAIL_DEFAULT_ORIGIN[cm.customer];   // e.g. CATALYST → NEW WESTMINSTER, BC when blank
+    const key=cm.customer+'||'+origin;
+    const row=pivot[key] || (pivot[key]={ customer:cm.customer, origin, counts:{}, cars:{} });
+    row.counts[best]=(row.counts[best]||0)+1;
+    // Keep the car-level detail behind each count so a click can drill in.
+    let carRaw=''; for(const r of recs){ if(r.carRaw){ carRaw=r.carRaw; break; } }
+    const reports=recs.map(r=>r.rt).filter((v,i,a)=>v&&a.indexOf(v)===i).map(t=>RAIL_TYPE_LABEL[t]||t);
+    (row.cars[best]=row.cars[best]||[]).push({ car:carRaw, customer:cm.customer, commodity, origin, status:best, manual:manual, reports:reports.join(', ') });
+  });
+  const rows=Object.values(pivot).sort((a,b)=> a.customer.localeCompare(b.customer) || a.origin.localeCompare(b.origin));
+  rows.forEach((r,i)=>r._i=i);
+  return { rows, mapped, unmapped, otherWh, excludedTransit, excludedReleased };
+}
+// Drill-down: list the individual cars behind a clicked count cell (per-row or a column/grand total).
+let _railBuilt=null;
+let _railModal=null;
+function _railCarsModal(title, sub, cars, showCustomer){
+  _railModal={ title, sub, cars, showCustomer };
+  const editable = !!(state.user && state.user.role==='admin') && !(_railBuilt && _railBuilt.archived);
+  const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const cols = showCustomer
+    ? [{h:'Customer'},{h:'Rail Car'},{h:'Commodity'},{h:'Origin'},{h:'Status'},{h:'Seen On'}]
+    : [{h:'Rail Car'},{h:'Commodity'},{h:'Origin'},{h:'Status'},{h:'Seen On'}];
+  const colgroup='';
+  const _bcol=b=>({'RELEASED':'#166534','ACTUALLY PLACED':'#0369a1','ORDERED':'#7c3aed','CONSTRUCTIVELY PLACED':'#b45309','IN TRANSIT':'#6b7280'}[b]||'#111');
+  const thead='<thead><tr>'+cols.map(c=>`<th>${esc(c.h)}</th>`).join('')+'</tr></thead>';
+  const rowHtml=c=>{ const cells=[];
+    if(showCustomer) cells.push(`<td class="rm-cust">${esc(c.customer)}</td>`);
+    cells.push(`<td class="rm-car">🚆 ${esc(c.car)}</td>`);
+    cells.push(`<td>${esc(c.commodity||'—')}</td>`);
+    cells.push(`<td>${esc(c.origin||'—')}</td>`);
+    cells.push(editable
+      ? `<td><select onchange="railSetStatus('${esc(c.car)}',this.value)" title="Manually set this car's status (reports sometimes lag)" style="font-size:10px;font-weight:700;padding:3px 7px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:${_bcol(c.status)}"><option value="">Auto</option>${RAIL_BUCKETS.map(b=>`<option value="${b}"${c.status===b?' selected':''}>${b}</option>`).join('')}</select>${c.manual?' <span title="Manually set" style="color:#b45309;font-weight:800">✎</span>':''}</td>`
+      : `<td><span style="font-size:9px;font-weight:800;letter-spacing:.3px;padding:2px 8px;border-radius:999px;white-space:nowrap;background:${_bcol(c.status)}1f;color:${_bcol(c.status)}">${esc(c.status||'')}</span></td>`);
+    cells.push(`<td class="rm-seen">${esc(c.reports||'')}</td>`);
+    return '<tr>'+cells.join('')+'</tr>'; };
+  const rowsHtml=cars.length? cars.map(rowHtml).join('')
+    : `<tr><td colspan="${cols.length}" style="padding:16px;text-align:center;color:var(--text2)">No cars.</td></tr>`;
+  document.getElementById('modal-container').innerHTML=`
+    <style>
+      .rm-table{ border-collapse:collapse; font-size:12.5px; white-space:nowrap; }
+      .rm-table th{ position:sticky; top:0; background:var(--surface2); text-align:left; padding:8px 16px; font-size:9px; letter-spacing:1px; text-transform:uppercase; color:var(--text2); font-weight:800; border-bottom:2px solid var(--border); white-space:nowrap; }
+      .rm-table td{ padding:7px 16px; border-bottom:1px solid var(--border); white-space:nowrap; }
+      .rm-table .rm-car{ font-weight:700; white-space:nowrap; }
+      .rm-table .rm-cust{ font-weight:700; }
+      .rm-table .rm-seen{ color:var(--text2); font-size:11px; }
+    </style>
+    <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+      <div class="modal" style="width:min(${showCustomer?1180:880}px, 96vw);max-width:96vw">
+        <h2 style="margin:0 0 3px">${esc(title)}</h2>
+        <p style="color:var(--text2);font-size:12px;margin:0 0 12px">${esc(sub)} — ${cars.length} car${cars.length===1?'':'s'}</p>
+        <div style="max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:8px">
+          <table class="rm-table">${colgroup}${thead}<tbody>${rowsHtml}</tbody></table>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
+          ${cars.length?`<button class="sign-out-btn" onclick="railExportModal()" style="background:#1d6f42;color:#fff;border-color:#1d6f42" title="Export these cars to Excel">⤓ Export</button>`:''}
+          <button class="sign-out-btn" onclick="closeModal()">Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+// Export the car list currently shown in the drill-down modal (same styled format as the pivot export).
+function railExportModal(){
+  if(!_railModal || !_railModal.cars || !_railModal.cars.length){ showAlert('Nothing to export.'); return; }
+  const m=_railModal, sc=!!m.showCustomer;
+  const X = (typeof XLSXStyle!=='undefined' && XLSXStyle && XLSXStyle.utils) ? XLSXStyle : XLSX;
+  const head=(sc?['CUSTOMER']:[]).concat(['RAIL CAR','COMMODITY','ORIGIN','STATUS','SEEN ON']);
+  const aoa=[head];
+  m.cars.forEach(c=>{ aoa.push((sc?[c.customer||'']:[]).concat([c.car||'', c.commodity||'', c.origin||'', c.status||'', c.reports||''])); });
+  const ws=X.utils.aoa_to_sheet(aoa); const nCols=head.length;
+  ws['!cols']=(sc?[{wch:20}]:[]).concat([{wch:16},{wch:20},{wch:28},{wch:22},{wch:24}]);
+  const line={style:'medium',color:{rgb:'000000'}};
+  const headStyle={ font:{bold:true}, alignment:{horizontal:'center',vertical:'center'}, border:{bottom:line} };
+  for(let c=0;c<nCols;c++){ const a=X.utils.encode_cell({r:0,c}); if(ws[a]) ws[a].s=headStyle; }
+  const wb=X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Rail cars');
+  const d=new Date(), p=n=>(n<10?'0':'')+n;
+  X.writeFile(wb, 'Rail_'+RAIL_WAREHOUSE+'_cars_'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+'.xlsx');
+}
+let _railModalSrc=null;
+function railShowModalFromSrc(){
+  const src=_railModalSrc; if(!src || !_railBuilt) return;
+  if(src.kind==='cell'){
+    const r=_railBuilt.rows.find(x=>x.customer===src.customer && x.origin===src.origin);
+    let cars=[];
+    if(r){ if(src.bucket==='*'){ RAIL_BUCKETS.forEach(b=>{ (r.cars[b]||[]).forEach(c=>cars.push(c)); }); } else { cars=(r.cars&&r.cars[src.bucket])||[]; } }
+    _railCarsModal((src.customer||'')+' · '+(src.origin||'—'), src.bucket==='*'?'All statuses':src.bucket, cars, false);
+  } else {
+    const cars=[]; const buckets = src.bucket==='*' ? RAIL_BUCKETS : [src.bucket];
+    _railBuilt.rows.forEach(r=>{ buckets.forEach(b=>{ (r.cars[b]||[]).forEach(c=>cars.push(c)); }); });
+    cars.sort((a,b)=> String(a.customer).localeCompare(b.customer) || String(a.origin).localeCompare(b.origin));
+    _railCarsModal(src.bucket==='*'?('All cars · warehouse '+RAIL_WAREHOUSE):('All '+src.bucket), src.bucket==='*'?'Grand total':('Grand total · '+src.bucket), cars, true);
+  }
+}
+function railDetail(rowIdx, bucket){
+  if(!_railBuilt || !_railBuilt.rows[rowIdx]) return;
+  const r=_railBuilt.rows[rowIdx]; _railModalSrc={kind:'cell', customer:r.customer, origin:r.origin, bucket};
+  railShowModalFromSrc();
+}
+function railDetailRow(rowIdx){
+  if(!_railBuilt || !_railBuilt.rows[rowIdx]) return;
+  const r=_railBuilt.rows[rowIdx]; _railModalSrc={kind:'cell', customer:r.customer, origin:r.origin, bucket:'*'};
+  railShowModalFromSrc();
+}
+function railDetailTotal(bucket){
+  if(!_railBuilt) return; _railModalSrc={kind:'total', bucket};
+  railShowModalFromSrc();
+}
+function railRefreshModal(){ if(_railModalSrc) railShowModalFromSrc(); }
+// Manually override a car's status (reports sometimes lag). Empty value clears it (back to Auto).
+function railSetStatus(car, status){
+  if(!(state.user && state.user.role==='admin')){ showAlert('Admin only','warning'); return; }
+  const key=railNormCar(car); if(!key) return;
+  state.railStatusOverride=state.railStatusOverride||{};
+  if(!status){ delete state.railStatusOverride[key]; db.ref(ROOT+'/railStatusOverride/'+key).remove().catch(()=>{}); }
+  else { const rec={ status:status, at:Date.now(), by:(state.user&&state.user.label)||'' }; state.railStatusOverride[key]=rec; db.ref(ROOT+'/railStatusOverride/'+key).set(rec).catch(e=>console.warn('rail status override',e)); }
+  if(state.tab==='rail') renderRail();
+  railRefreshModal();
+}
+// Export the current pivot to .xlsx in the same Customer · Origin · buckets · Grand Total layout.
+function railExport(){
+  if(!_railBuilt){ showAlert('Nothing to export yet.'); return; }
+  const B=RAIL_BUCKETS;
+  const title=b=>b.toLowerCase().replace(/\b\w/g,c=>c.toUpperCase());
+  const aoa=[['CUSTOMER','ORIGIN'].concat(B.map(title)).concat(['GRAND TOTAL'])];
+  const tot={}; B.forEach(b=>tot[b]=0);
+  _railBuilt.rows.forEach(r=>{ let rt=0; const cells=B.map(b=>{ const v=r.counts[b]||0; rt+=v; tot[b]+=v; return v||''; });
+    aoa.push([r.customer, r.origin].concat(cells).concat([rt])); });
+  let gt=0; B.forEach(b=>gt+=tot[b]);
+  aoa.push(['GRAND TOTAL',''].concat(B.map(b=>tot[b]||0)).concat([gt]));
+  // Use the style-capable build for a formatted sheet; fall back to the plain build if it didn't load.
+  const X = (typeof XLSXStyle!=='undefined' && XLSXStyle && XLSXStyle.utils) ? XLSXStyle : XLSX;
+  const ws=X.utils.aoa_to_sheet(aoa); const nCols=aoa[0].length, lastRow=aoa.length-1;
+  ws['!cols']=[{wch:24},{wch:20}].concat(B.map(()=>({wch:18}))).concat([{wch:12}]);
+  // Bold header with an underline, centered data, and a bold totals row with a line above it.
+  const line={style:'medium',color:{rgb:'000000'}};
+  const headStyle={ font:{bold:true}, alignment:{horizontal:'center',vertical:'center'}, border:{bottom:line} };
+  const dataStyle={ alignment:{horizontal:'center',vertical:'center'} };
+  const totStyle ={ font:{bold:true}, alignment:{horizontal:'center',vertical:'center'}, border:{top:line} };
+  for(let r=0;r<aoa.length;r++){ for(let c=0;c<nCols;c++){ const addr=X.utils.encode_cell({r,c}); const cell=ws[addr]; if(!cell) continue;
+    cell.s = r===0 ? headStyle : (r===lastRow ? totStyle : dataStyle); } }
+  const wb=X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Rail '+RAIL_WAREHOUSE);
+  const d=new Date(), p=n=>(n<10?'0':'')+n;
+  X.writeFile(wb, 'Rail_'+RAIL_WAREHOUSE+'_'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+'.xlsx');
+}
+function renderRail(){
+  const view=document.getElementById('view-rail'); if(!view) return;
+  const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const admin=!!(state.user && state.user.role==='admin');
+  const slots=state.railReports||{};
+  const haveMaps=!!(state.refTable && Array.isArray(state.refTable.railCommodity) && state.refTable.railCommodity.length);
+  const built=railCurrentBuilt(); _railBuilt=built; railAutoArchive();
+  if(!_railAutoTimer) _railAutoTimer=setInterval(function(){ try{ const n=railArchiveMaybe(false); if(n && state.tab==='rail') renderRail(); }catch(e){} }, 600000);
+  const B=RAIL_BUCKETS;
+  const tot={}; B.forEach(b=>tot[b]=0); let gt=0;
+  built.rows.forEach(r=>B.forEach(b=>tot[b]+=(r.counts[b]||0))); B.forEach(b=>gt+=tot[b]);
+  const chip=(t)=>{ const s=slots[t]; const ok=!!s;
+    return `<div style="flex:1 1 180px;min-width:160px;border:1px solid ${ok?'#0369a1':'var(--border)'};border-radius:9px;padding:9px 12px;background:${ok?'rgba(3,105,161,.05)':'var(--surface)'}">
+      <div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--text2);font-weight:800">${esc(RAIL_TYPE_LABEL[t])}</div>
+      <div style="font-size:12px;font-weight:700;margin-top:3px;color:${ok?'#0369a1':'var(--text2)'}">${ok?('✓ '+(s.records?s.records.length:0)+' cars'):'— drop file'}</div>
+      <div style="font-size:10px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${ok?(esc(s.name||'')+(s.at?(' · '+esc(railFmtTime(s.at))):'')):'not loaded'}</div>
+    </div>`; };
+  const col=b=>({'RELEASED':'#166534','ACTUALLY PLACED':'#0369a1','ORDERED':'#7c3aed','CONSTRUCTIVELY PLACED':'#b45309','IN TRANSIT':'#6b7280'}[b]||'#111');
+  let body='';
+  if(!built.rows.length){
+    body=`<tr><td colspan="${B.length+3}" style="padding:26px;text-align:center;color:var(--text2);font-size:13px">${Object.keys(slots).length?'No cars matched this warehouse ('+RAIL_WAREHOUSE+') from the loaded reports.':'Drop the 3 daily rail reports above to build the view.'}</td></tr>`;
+  } else {
+    built.rows.forEach(r=>{ let rt=0; const cells=B.map(b=>{ const v=r.counts[b]||0; rt+=v;
+        return `<td class="rc-num">${v?`<span class="rc-link" onclick="railDetail(${r._i},'${b}')" title="Show the ${v} car${v===1?'':'s'}">${v}</span>`:'<span style="color:var(--border)">·</span>'}</td>`; }).join('');
+      body+=`<tr><td style="font-weight:700">${esc(r.customer)}</td><td style="color:var(--text2)">${esc(r.origin)}</td>${cells}<td class="rc-num" style="font-weight:800">${rt?`<span class="rc-link" onclick="railDetailRow(${r._i})" title="Show all ${rt} cars">${rt}</span>`:0}</td></tr>`; });
+    const tcells=B.map(b=>`<td class="rc-num" style="font-weight:800;color:${col(b)}">${tot[b]?`<span class="rc-link" style="color:${col(b)};border-bottom-color:${col(b)}" onclick="railDetailTotal('${b}')" title="Show all ${tot[b]} ${b} car${tot[b]===1?'':'s'}">${tot[b]}</span>`:0}</td>`).join('');
+    body+=`<tr style="background:var(--surface2);border-top:2px solid var(--border)"><td style="font-weight:800">GRAND TOTAL</td><td></td>${tcells}<td class="rc-num" style="font-weight:800">${gt?`<span class="rc-link" onclick="railDetailTotal('*')" title="Show all ${gt} cars">${gt}</span>`:0}</td></tr>`;
+  }
+  const heads=`<th style="text-align:left">Customer</th><th style="text-align:left">Origin</th>`+B.map(b=>`<th class="rc-num" style="color:${col(b)}">${esc(b)}</th>`).join('')+`<th class="rc-num">Grand Total</th>`;
+  view.innerHTML=`
+    <style>
+      #view-rail .rc-num{ text-align:center; font-variant-numeric:tabular-nums; }
+      #view-rail table{ width:100%; border-collapse:separate; border-spacing:0; font-size:12.5px; }
+      #view-rail thead th{ position:sticky; top:0; background:var(--surface2); padding:10px 14px; font-size:9px; letter-spacing:1px; text-transform:uppercase; color:var(--text2); font-weight:800; border-bottom:2px solid var(--border); white-space:nowrap; }
+      #view-rail tbody td{ padding:9px 14px; border-bottom:1px solid var(--border); }
+      #view-rail .rail-drop.rail-over{ border-color:#0369a1; background:rgba(3,105,161,.08); }
+      #view-rail .rc-link{ cursor:pointer; font-weight:700; color:#0369a1; border-bottom:1px dotted #0369a1; }
+      #view-rail .rc-link:hover{ background:rgba(3,105,161,.12); border-radius:3px; }
+    </style>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+      <h2 style="margin:0;font-size:17px">🚆 Rail · Placement View <span style="font-size:11px;color:var(--text2);font-weight:600">warehouse ${RAIL_WAREHOUSE}</span></h2>
+      ${built.rows.length?`<span style="font-size:11px;color:var(--text2)">${built.mapped} cars for this warehouse${built.otherWh?(' · '+built.otherWh+' other-warehouse'):''}${built.unmapped?(' · '+built.unmapped+' unmatched commodity'):''}${built.excludedTransit?(' · '+built.excludedTransit+' in-transit not on CSX'):''}${built.excludedReleased?(' · '+built.excludedReleased+' released (excluded)'):''}</span>`:''}
+      <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center">
+        ${(()=>{ const ds=Object.keys(state.railArchive||{}).sort().reverse(); return `<select onchange="railViewDateSet(this.value)" title="View a past daily snapshot" style="font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text)"><option value=""${!state.railViewDate?' selected':''}>● Live view</option>${ds.map(d=>`<option value="${d}"${state.railViewDate===d?' selected':''}>📁 ${d}</option>`).join('')}</select>`; })()}
+        ${admin?`<button class="sign-out-btn" onclick="railArchiveNow()" style="font-size:12px" title="Freeze this view as the daily snapshot (ET)">📸 Snapshot</button>`:''}
+        ${built.rows.length?`<button class="sign-out-btn" onclick="railExport()" style="font-size:12px;background:#1d6f42;color:#fff;border-color:#1d6f42" title="Export this view to Excel">⤓ Export</button>`:''}
+        ${admin&&Object.keys(slots).length&&!built.archived?`<button class="sign-out-btn" onclick="railClearReports()" style="font-size:12px;color:var(--danger)">Clear reports</button>`:''}
+      </span>
+    </div>
+    ${!haveMaps?`<div style="background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.3);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#b45309">Using built-in default commodity/status maps. Import the revised sheet with the <b>Update Table</b> button at the top to make your commodity &amp; status maps live.</div>`:''}
+    ${built.archived?`<div style="background:rgba(3,105,161,.08);border:1px solid rgba(3,105,161,.35);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#0369a1">📁 Viewing archived snapshot for <b>${esc(built.date)}</b>${built.at?(' · captured '+esc(railEtStamp(built.at))):''} - read-only. <a onclick="railViewDateSet('')" style="cursor:pointer;color:#0369a1;text-decoration:underline;font-weight:700">Back to live view</a></div>`:''}
+    <div class="rail-drop" ondragover="event.preventDefault();this.classList.add('rail-over')" ondragleave="this.classList.remove('rail-over')" ondrop="railDrop(event)"
+         style="border:2px dashed var(--border);border-radius:12px;padding:12px;margin-bottom:14px">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">⤓ Drag &amp; drop the 3 daily reports here (CSX Report · Omni Report · WRK QTS Report) — any order, .csv or .xlsx. Hidden tabs are ignored.</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">${chip('equip')}${chip('placement')}${chip('pipeline')}</div>
+    </div>
+    <div style="border:1px solid var(--border);border-radius:12px;overflow:auto;background:var(--surface)">
+      <table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>
+    </div>`;
+  view.ondragover=function(e){ e.preventDefault(); };
+  view.ondrop=function(e){ railDrop(e); };
+}
+
 function switchTab(tab) {
   const _prev=state.tab, _ps=_viewScroller(_prev); if(_ps) _tabScroll[_prev]=_ps.scrollTop;   // remember where each tab was
   state.tab = tab;
   document.body.setAttribute('data-tab', tab);   // lets the phone card/table toggle show only on ib/ob
-  ['ib','ob','yd','sc','sd','cat','ff','pwd','ig','domtar'].forEach(t => {
+  ['ib','ob','yd','sc','sd','cat','ff','pwd','ig','domtar','rail'].forEach(t => {
     const v = document.getElementById('view-'+t); if(v) v.style.display = t===tab?'':'none';
     const btn = document.getElementById('tab-'+t); if(!btn) return;
-    btn.classList.remove('active-ib','active-ob','active-yd','active-sc','active-sd','active-cat','active-ff','active-pwd','active-ig','active-domtar');
+    btn.classList.remove('active-ib','active-ob','active-yd','active-sc','active-sd','active-cat','active-ff','active-pwd','active-ig','active-domtar','active-rail');
     if(t===tab) btn.classList.add(t==='ff'?'active-ff':'active-'+t);
   });
   if(tab==='ib') renderInbound();
@@ -3959,6 +4416,7 @@ function switchTab(tab) {
   if(tab==='pwd') renderPWD();
   if(tab==='ig') renderIPG();
   if(tab==='domtar') renderDomtar();
+  if(tab==='rail') renderRail();
   // Restore the tab's last scroll position so switching back doesn't jump to the top.
   try{ const ns=_viewScroller(tab); if(ns && _tabScroll[tab]!=null) ns.scrollTop=_tabScroll[tab]; }catch(e){}
   try{_saveView();}catch(e){}
@@ -6892,6 +7350,25 @@ function extractTable(wb) {
     }
     if (vals.length) out[key] = vals;
   });
+  // Rail reference maps live on the SAME table sheet (extra columns), so one "Update Table" import
+  // keeps them current — no separate import. Commodity map: COMMODITY | CUSTOMER | WAREHOUSE.
+  // Status map: DATA STATUS | REPORT STATUS (raw rail event/placement code -> one of the 5 buckets).
+  const hU = headers.map(h=>String(h==null?'':h).trim().toUpperCase());
+  const clean2 = v => String(v==null?'':v).trim();
+  const cCom=hU.indexOf('COMMODITY'), cWh=hU.indexOf('WAREHOUSE'), cCust=hU.indexOf('CUSTOMER');
+  if (cCom>-1 && cCust>-1 && cWh>-1) {
+    const rc=[];
+    for (let r=1;r<rows.length;r++){ const com=clean2(rows[r][cCom]); if(!com) continue;
+      rc.push({ commodity:com.toUpperCase(), customer:clean2(rows[r][cCust]).toUpperCase(), warehouse:clean2(rows[r][cWh]) }); }
+    if (rc.length) out.railCommodity = rc;
+  }
+  const cDS=hU.indexOf('DATA STATUS'), cRS=hU.indexOf('REPORT STATUS');
+  if (cDS>-1 && cRS>-1) {
+    const rs=[];
+    for (let r=1;r<rows.length;r++){ const ds=clean2(rows[r][cDS]), rp=clean2(rows[r][cRS]); if(!ds && !rp) continue;
+      rs.push({ data:ds.toUpperCase(), report:rp.toUpperCase() }); }
+    if (rs.length) out.railStatus = rs;
+  }
   return out;
 }
 const TABLE_LABELS = { operators:'Operators', customerIB:'Customer (Inbound)', customerOB:'Customer (Outbound)', door:'Doors', stageLane:'Staging Lanes', outStatus:'Outbound Status', inStatus:'Inbound Status' };
@@ -7914,9 +8391,9 @@ function renderScorecard(){
     return `<tr class="${(wknd+hl).trim()}"${isToday} onclick="scRowClick(event,'${d}')" title="Click to highlight this row">
       <td class="sc-date">${fmtScDate(d)}</td><td>${scWeekNum(d)}</td>
       <td class="sc-calc" title="Auto: Inbound loads marked COMPLETED for this date">${cell(r.trkRecv)}</td>
-      <td>${minp(d,'railRecv',r.railRecv)}</td>
-      <td>${minp(d,'pendRail',r.pendRail)}</td>
-      <td>${minp(d,'railTransit',r.railTransit)}</td>
+      <td class="sc-calc" title="Auto: Actually Placed from the Rail tab import for this date — not manually editable">${cell(r.railRecv)}</td>
+      <td class="sc-calc" title="Auto: Constructively Placed from the Rail tab import for this date — not manually editable">${cell(r.pendRail)}</td>
+      <td class="sc-calc" title="Auto: In Transit from the Rail tab import for this date — not manually editable">${cell(r.railTransit)}</td>
       ${(scBoard().fftiFromYard && d===today)
         ? `<td class="sc-calc" title="Auto: live FFTI trailers on the yard doors">${cell(r.ffti)}</td>`
         : `<td>${minp(d,'ffti',r.ffti)}</td>`}
