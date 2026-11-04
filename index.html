@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-151';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807151;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-153';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807153;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4054,14 +4054,14 @@ function railParseRows(type, idx, rows){
   const out=[];
   const mk=row=>(name=>{ const i=idx[name]; return i==null?'':String(row[i]==null?'':row[i]).trim(); });
   rows.forEach(row=>{ if(!row || !row.length) return; const g=mk(row);
-    let carRaw, commodity, originCity, originState;
-    if(type==='equip'){ carRaw=g('EQUIPMENT'); commodity=g('STCC DESCRIPTION'); originCity=g('ORIGIN CITY'); originState=g('ORIGIN STATE'); }
-    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
-    else { carRaw=g('UNIT ID'); commodity=''; const og=g('ORIGIN'); const p=og.split(','); originCity=(p[0]||'').trim(); originState=(p[1]||'').trim(); }
+    let carRaw, commodity, originCity, originState, destRaw;
+    if(type==='equip'){ carRaw=g('EQUIPMENT'); commodity=g('STCC DESCRIPTION'); originCity=g('ORIGIN CITY'); originState=g('ORIGIN STATE'); destRaw=g('DESTINATION CITY')||g('DESTINATION'); }
+    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; destRaw=g('DESTINATION CITY')||g('DESTINATION'); }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
+    else { carRaw=g('UNIT ID'); commodity=''; const og=g('ORIGIN'); const p=og.split(','); originCity=(p[0]||'').trim(); originState=(p[1]||'').trim(); destRaw=g('DESTINATION')||g('DESTINATION CITY'); }
     if(!carRaw) return;
     const _rawCom=railNormCom(commodity); let com=_rawCom, _ds=railRowStatusCode(type,g);
     if(_rawCom==='**EMPTY**'||_rawCom==='EMPTY'){ com=''; _ds='EMPTY'; }   // an empty car has been released
-    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim() });
+    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim(), dest:String(destRaw||'').toUpperCase().trim() });
   });
   return out;
 }
@@ -4171,9 +4171,10 @@ function railBuild(){
   ['equip','placement','pipeline'].forEach(t=>{ const s=slots[t]; if(s && Array.isArray(s.records)) s.records.forEach(r=>all.push(r)); });
   const comMap=railCommodityMap(), stMap=railStatusMap();
   const byCar={}; all.forEach(r=>{ if(!r.car) return; (byCar[r.car]=byCar[r.car]||[]).push(r); });
-  const pivot={}; let mapped=0, unmapped=0, otherWh=0, excludedTransit=0, excludedReleased=0;
+  const pivot={}; let mapped=0, unmapped=0, otherWh=0, excludedTransit=0, excludedReleased=0, excludedDest=0;
   Object.keys(byCar).forEach(car=>{
     const recs=byCar[car];
+    if(recs.some(r=>String(r.dest||'').indexOf('INDIANAPOLIS')>-1)){ excludedDest++; return; }   // exclude cars whose destination is Indianapolis
     let commodity=''; for(const r of recs){ if(r.commodity){ commodity=r.commodity; break; } }
     let cm = commodity ? comMap[commodity] : null;
     if(!cm){ let _sh=''; for(const r of recs){ if(r.shipper){ _sh=r.shipper; break; } } cm = railShipperCM(_sh, comMap); }   // WestRock QTS pipeline cars have no commodity — map by shipper
@@ -4204,7 +4205,7 @@ function railBuild(){
   });
   const rows=Object.values(pivot).sort((a,b)=> a.customer.localeCompare(b.customer) || a.origin.localeCompare(b.origin));
   rows.forEach((r,i)=>r._i=i);
-  return { rows, mapped, unmapped, otherWh, excludedTransit, excludedReleased };
+  return { rows, mapped, unmapped, otherWh, excludedTransit, excludedReleased, excludedDest };
 }
 // Drill-down: list the individual cars behind a clicked count cell (per-row or a column/grand total).
 let _railBuilt=null;
@@ -4411,7 +4412,7 @@ function renderRail(){
     <style>
       #view-rail .rc-num{ text-align:center; font-variant-numeric:tabular-nums; }
       #view-rail table{ width:100%; border-collapse:separate; border-spacing:0; font-size:12.5px; }
-      #view-rail thead th{ position:sticky; top:0; background:var(--surface2); padding:10px 14px; font-size:9px; letter-spacing:1px; text-transform:uppercase; color:var(--text2); font-weight:800; border-bottom:2px solid var(--border); white-space:nowrap; }
+      #view-rail thead th{ position:sticky; top:0; z-index:2; background:var(--surface2); padding:10px 14px; font-size:9px; letter-spacing:1px; text-transform:uppercase; color:var(--text2); font-weight:800; border-bottom:2px solid var(--border); white-space:nowrap; }
       #view-rail tbody td{ padding:9px 14px; border-bottom:1px solid var(--border); }
       #view-rail .rail-drop.rail-over{ border-color:#0369a1; background:rgba(3,105,161,.08); }
       #view-rail .rc-link{ cursor:pointer; font-weight:700; color:#0369a1; border-bottom:1px dotted #0369a1; }
@@ -4426,7 +4427,7 @@ function renderRail(){
     </style>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
       <h2 style="margin:0;font-size:17px">🚆 Rail · Placement View <span style="font-size:11px;color:var(--text2);font-weight:600">warehouse ${RAIL_WAREHOUSE}</span></h2>
-      ${built.rows.length?`<span style="font-size:11px;color:var(--text2)">${built.mapped} cars for this warehouse${built.otherWh?(' · '+built.otherWh+' other-warehouse'):''}${built.unmapped?(' · '+built.unmapped+' unmatched commodity'):''}${built.excludedTransit?(' · '+built.excludedTransit+' in-transit not on CSX'):''}${built.excludedReleased?(' · '+built.excludedReleased+' released (excluded)'):''}</span>`:''}
+      ${built.rows.length?`<span style="font-size:11px;color:var(--text2)">${built.mapped} cars for this warehouse${built.otherWh?(' · '+built.otherWh+' other-warehouse'):''}${built.unmapped?(' · '+built.unmapped+' unmatched commodity'):''}${built.excludedTransit?(' · '+built.excludedTransit+' in-transit not on CSX'):''}${built.excludedReleased?(' · '+built.excludedReleased+' released (excluded)'):''}${built.excludedDest?(' · '+built.excludedDest+' Indianapolis (excluded)'):''}</span>`:''}
       <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center">
         ${(()=>{ const ds=Object.keys(state.railArchive||{}).sort().reverse(); return `<select onchange="railViewDateSet(this.value)" title="View a past daily snapshot" style="font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text)"><option value=""${!state.railViewDate?' selected':''}>● Live view</option>${ds.map(d=>`<option value="${d}"${state.railViewDate===d?' selected':''}>📁 ${d}</option>`).join('')}</select>`; })()}
         ${admin?`<button class="sign-out-btn" onclick="railArchiveNow()" style="font-size:12px" title="Freeze this view as the daily snapshot (ET)">📸 Snapshot</button>`:''}
@@ -4446,7 +4447,7 @@ function renderRail(){
         style="width:100%;padding:9px 12px 9px 12px;font-size:13px;border:1px solid var(--border);border-radius:9px;background:var(--surface);color:var(--text);box-sizing:border-box" />
       <div id="rail-search-results" style="display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:40;max-height:340px;overflow:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.16)"></div>
     </div>
-    <div style="border:1px solid var(--border);border-radius:12px;overflow:auto;background:var(--surface)">
+    <div style="border:1px solid var(--border);border-radius:12px;overflow:auto;background:var(--surface);max-height:calc(100vh - 240px);min-height:180px">
       <table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>
     </div>`;
   view.ondragover=function(e){ e.preventDefault(); };
