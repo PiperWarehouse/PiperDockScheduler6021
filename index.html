@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-148';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807148;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-151';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807151;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -3994,6 +3994,8 @@ function railNormCom(s){ return String(s==null?'':s).toUpperCase().replace(/\s+/
 function railFmtTime(ts){ try{ return new Date(ts).toLocaleString([], {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } }
 // Commodity-fixed origins — these commodities always ship from a known plant, so force the origin.
 const RAIL_COMMODITY_ORIGIN = { 'BEVERAGE,FLVD':'LA JUNTA', 'BEVERAGE FLVD':'LA JUNTA', 'BEVERAGE FRUIT':'WACO' };
+// Customer-fixed origins — these customers always ship from one plant, so force the origin (commodity-fixed origins above still win).
+const RAIL_CUSTOMER_ORIGIN = { 'DOMTAR':'ASHDOWN, AR' };
 // Shipper -> customer fallback for cars with no commodity (e.g. WRK QTS pipeline cars, which carry a
 // Shipper but no commodity). WestRock variants -> SMURFIT WESTROCK. Warehouse is read from the commodity
 // map by that customer, so it follows whatever the maps say.
@@ -4013,6 +4015,7 @@ const RAIL_DEFAULT_ORIGIN = { 'CATALYST':'NEW WESTMINSTER, BC' };
 function railCommodityMap(){
   const src=(state.refTable && Array.isArray(state.refTable.railCommodity) && state.refTable.railCommodity.length) ? state.refTable.railCommodity : RAIL_DEFAULT_COMMODITY;
   const m={}; src.forEach(x=>{ const c=railNormCom(x.commodity); if(!c) return; m[c]={ customer:String(x.customer||'').toUpperCase().trim(), warehouse:String(x.warehouse||'').trim() }; });
+  if(!m['PAPER GRND WOOD']) m['PAPER GRND WOOD']={ customer:'CATALYST', warehouse:'6021' };   // always decipher Paper Grnd Wood as Catalyst, even if an imported map omits the row
   return m;
 }
 function railStatusMap(){
@@ -4188,7 +4191,8 @@ function railBuild(){
     if(best==='IN TRANSIT' && !manual && !recs.some(r=>r.rt==='equip' || r.rt==='pipeline')){ excludedTransit++; return; }   // In Transit valid on CSX or WRK QTS; Omni-only excluded
     mapped++;
     let origin=(originCity||'') + (originState?(', '+originState):'');
-    if(RAIL_COMMODITY_ORIGIN[commodity]) origin=RAIL_COMMODITY_ORIGIN[commodity];   // e.g. BEVERAGE,FLVD → LA JUNTA · BEVERAGE FRUIT → WACO
+    if(RAIL_CUSTOMER_ORIGIN[cm.customer]) origin=RAIL_CUSTOMER_ORIGIN[cm.customer];   // e.g. DOMTAR → ASHDOWN, AR (always)
+    if(RAIL_COMMODITY_ORIGIN[commodity]) origin=RAIL_COMMODITY_ORIGIN[commodity];   // commodity-fixed origin still wins (e.g. BEVERAGE,FLVD → LA JUNTA · BEVERAGE FRUIT → WACO)
     if(!origin && RAIL_DEFAULT_ORIGIN[cm.customer]) origin=RAIL_DEFAULT_ORIGIN[cm.customer];   // e.g. CATALYST → NEW WESTMINSTER, BC when blank
     const key=cm.customer+'||'+origin;
     const row=pivot[key] || (pivot[key]={ customer:cm.customer, origin, counts:{}, cars:{} });
@@ -4275,6 +4279,9 @@ function railShowModalFromSrc(){
     let cars=[];
     if(r){ if(src.bucket==='*'){ RAIL_BUCKETS.forEach(b=>{ (r.cars[b]||[]).forEach(c=>cars.push(c)); }); } else { cars=(r.cars&&r.cars[src.bucket])||[]; } }
     _railCarsModal((src.customer||'')+' · '+(src.origin||'—'), src.bucket==='*'?'All statuses':src.bucket, cars, false);
+  } else if(src.kind==='search'){
+    const cars=[]; _railBuilt.rows.forEach(r=>RAIL_BUCKETS.forEach(b=>(r.cars[b]||[]).forEach(c=>{ if(railNormCar(c.car)===src.car) cars.push(c); })));
+    _railCarsModal('Rail Car '+(src.carRaw||''), src.sub||'', cars, true);
   } else {
     const cars=[]; const buckets = src.bucket==='*' ? RAIL_BUCKETS : [src.bucket];
     _railBuilt.rows.forEach(r=>{ buckets.forEach(b=>{ (r.cars[b]||[]).forEach(c=>cars.push(c)); }); });
@@ -4297,6 +4304,44 @@ function railDetailTotal(bucket){
   railShowModalFromSrc();
 }
 function railRefreshModal(){ if(_railModalSrc) railShowModalFromSrc(); }
+// ─── Rail car search (free-text, live typeahead over the current view) ───
+let _railSearchQ='';
+let _railSearchResults=[];
+function _railSrCol(b){ return ({'ACTUALLY PLACED':'#0369a1','ORDERED':'#7c3aed','CONSTRUCTIVELY PLACED':'#b45309','IN TRANSIT':'#6b7280'})[b]||'#111'; }
+function _railAllCars(){
+  const out=[]; if(!_railBuilt||!_railBuilt.rows) return out;
+  _railBuilt.rows.forEach(r=>{ RAIL_BUCKETS.forEach(b=>{ (r.cars[b]||[]).forEach(c=>out.push(c)); }); });
+  return out;
+}
+function railSearch(q){
+  _railSearchQ=q||'';
+  const box=document.getElementById('rail-search-results'); if(!box) return;
+  const raw=String(q||'').trim();
+  if(!raw){ box.style.display='none'; box.innerHTML=''; _railSearchResults=[]; return; }
+  const norm=s=>String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const nq=norm(raw), uq=raw.toUpperCase();
+  const cars=_railAllCars().filter(c=>{
+    if(nq && norm(c.car).indexOf(nq)>=0) return true;
+    return [c.customer,c.origin,c.commodity,c.status,c.reports].some(f=>String(f==null?'':f).toUpperCase().indexOf(uq)>=0);
+  });
+  const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  box.style.display='';
+  if(!cars.length){ _railSearchResults=[]; box.innerHTML='<div style="padding:10px 12px;color:var(--text2);font-size:12px">No rail cars match “'+esc(raw)+'”.</div>'; return; }
+  const shown=cars.slice(0,40); _railSearchResults=shown;
+  box.innerHTML=shown.map((c,i)=>'<div class="rail-sr" onclick="railSearchOpen('+i+')">'
+    +'<span class="rm-car">🚆 '+esc(c.car)+'</span>'
+    +'<span class="rail-sr-badge" style="background:'+_railSrCol(c.status)+'1f;color:'+_railSrCol(c.status)+'">'+esc(c.status||'')+'</span>'
+    +'<span class="rail-sr-meta">'+esc(c.customer||'')+' · '+esc(c.origin||'—')+(c.commodity?(' · '+esc(c.commodity)):'')+'</span>'
+    +'<span class="rail-sr-seen">'+esc(c.reports||'')+'</span>'
+    +'</div>').join('')
+    + (cars.length>shown.length?('<div style="padding:6px 12px;color:var(--text2);font-size:11px;border-top:1px solid var(--border)">Showing first '+shown.length+' of '+cars.length+' matches — refine your search.</div>'):'');
+}
+function railSearchOpen(i){
+  const c=_railSearchResults[i]; if(!c) return;
+  const box=document.getElementById('rail-search-results'); if(box) box.style.display='none';
+  _railModalSrc={kind:'search', car:railNormCar(c.car), carRaw:c.car, sub:(c.customer||'')+' · '+(c.origin||'—')};
+  railShowModalFromSrc();
+}
 // Manually override a car's status (reports sometimes lag). Empty value clears it (back to Auto).
 function railSetStatus(car, status){
   if(!(state.user && state.user.role==='admin')){ showAlert('Admin only','warning'); return; }
@@ -4371,6 +4416,13 @@ function renderRail(){
       #view-rail .rail-drop.rail-over{ border-color:#0369a1; background:rgba(3,105,161,.08); }
       #view-rail .rc-link{ cursor:pointer; font-weight:700; color:#0369a1; border-bottom:1px dotted #0369a1; }
       #view-rail .rc-link:hover{ background:rgba(3,105,161,.12); border-radius:3px; }
+      #view-rail .rail-sr{ display:flex; align-items:center; gap:10px; padding:8px 12px; cursor:pointer; border-bottom:1px solid var(--border); font-size:12.5px; white-space:nowrap; }
+      #view-rail .rail-sr:last-child{ border-bottom:none; }
+      #view-rail .rail-sr:hover{ background:var(--surface2); }
+      #view-rail .rail-sr .rm-car{ font-weight:800; }
+      #view-rail .rail-sr-badge{ font-size:9px; font-weight:800; letter-spacing:.3px; padding:2px 8px; border-radius:999px; white-space:nowrap; }
+      #view-rail .rail-sr-meta{ color:var(--text2); overflow:hidden; text-overflow:ellipsis; }
+      #view-rail .rail-sr-seen{ margin-left:auto; color:var(--text2); font-size:11px; }
     </style>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
       <h2 style="margin:0;font-size:17px">🚆 Rail · Placement View <span style="font-size:11px;color:var(--text2);font-weight:600">warehouse ${RAIL_WAREHOUSE}</span></h2>
@@ -4389,11 +4441,17 @@ function renderRail(){
       <div style="font-size:11px;color:var(--text2);margin-bottom:8px">⤓ Drag &amp; drop the 3 daily reports here (CSX Report · Omni Report · WRK QTS Report) — any order, .csv or .xlsx. Hidden tabs are ignored.</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">${chip('equip')}${chip('placement')}${chip('pipeline')}</div>
     </div>
+    <div style="position:relative;margin-bottom:12px;max-width:560px">
+      <input id="rail-search" type="text" value="${esc(_railSearchQ)}" oninput="railSearch(this.value)" onfocus="if(this.value.trim())railSearch(this.value)" onblur="setTimeout(function(){var b=document.getElementById('rail-search-results');if(b)b.style.display='none';},200)" placeholder="🔍 Search rail car # (spaces ignored), customer, origin…" autocomplete="off" spellcheck="false"
+        style="width:100%;padding:9px 12px 9px 12px;font-size:13px;border:1px solid var(--border);border-radius:9px;background:var(--surface);color:var(--text);box-sizing:border-box" />
+      <div id="rail-search-results" style="display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:40;max-height:340px;overflow:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.16)"></div>
+    </div>
     <div style="border:1px solid var(--border);border-radius:12px;overflow:auto;background:var(--surface)">
       <table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>
     </div>`;
   view.ondragover=function(e){ e.preventDefault(); };
   view.ondrop=function(e){ railDrop(e); };
+  try{ if(_railSearchQ) railSearch(_railSearchQ); }catch(e){}
 }
 
 function switchTab(tab) {
