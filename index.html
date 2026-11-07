@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-154';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807154;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-156';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807156;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4112,17 +4112,20 @@ function railClearReports(){ if(!(state.user&&state.user.role==='admin')) return
   if(!window.confirm('Clear all 3 loaded rail reports?')) return;
   state.railReports={}; db.ref(ROOT+'/railReports').remove().catch(()=>{}); renderRail(); }
 // Push the rail buckets onto BOTH daily scorecards for the import date:
-//   Tot Rail Recv ← Actually Placed · Pend Rail Yard ← Constructively Placed · Rail In Transit ← In Transit
+//   Tot Rail Recv ← Actually Placed · Pend Rail Yard ← Constructively Placed + Ordered (Ordered = in the yard) · Rail In Transit ← In Transit
 // 6021 board uses every car on the 6021 view; the Smurfit WRK board uses only SMURFIT WESTROCK cars.
+let _railPostSig='';
 function railPostToScorecard(){
   try{
     const built=railBuild(); const date=todayStr();
-    const agg=(filterFn)=>{ let ap=0,cp=0,it=0; built.rows.forEach(r=>{ if(filterFn && !filterFn(r)) return;
-      ap+=(r.counts['ACTUALLY PLACED']||0); cp+=(r.counts['CONSTRUCTIVELY PLACED']||0); it+=(r.counts['IN TRANSIT']||0); }); return {ap,cp,it}; };
+    const agg=(filterFn)=>{ let ap=0,cp=0,it=0,pl=0; built.rows.forEach(r=>{ if(filterFn && !filterFn(r)) return;
+      ap+=(r.counts['ACTUALLY PLACED']||0); cp+=(r.counts['CONSTRUCTIVELY PLACED']||0); it+=(r.counts['IN TRANSIT']||0); pl+=(r.counts['ORDERED']||0); }); return {ap,cp,it,pl}; };
     const all=agg(null), wrk=agg(r=>r.customer==='SMURFIT WESTROCK');
+    const _sig=JSON.stringify([date,all,wrk]); if(_sig===_railPostSig) return { date, all, wrk };   // nothing changed — skip the write
+    _railPostSig=_sig;
     const upd={};
-    upd['/scorecard/'+date+'/railRecv']=all.ap;    upd['/scorecard/'+date+'/pendRail']=all.cp;    upd['/scorecard/'+date+'/railTransit']=all.it;
-    upd['/scorecardWrk/'+date+'/railRecv']=wrk.ap; upd['/scorecardWrk/'+date+'/pendRail']=wrk.cp; upd['/scorecardWrk/'+date+'/railTransit']=wrk.it;
+    upd['/scorecard/'+date+'/railRecv']=all.ap;    upd['/scorecard/'+date+'/pendRail']=all.cp+all.pl;    upd['/scorecard/'+date+'/railTransit']=all.it;
+    upd['/scorecardWrk/'+date+'/railRecv']=wrk.ap; upd['/scorecardWrk/'+date+'/pendRail']=wrk.cp+wrk.pl; upd['/scorecardWrk/'+date+'/railTransit']=wrk.it;
     db.ref(ROOT).update(upd).catch(e=>console.warn('rail→scorecard save',e));
     return { date, all, wrk };
   }catch(e){ console.warn('railPostToScorecard',e); return null; }
@@ -4462,6 +4465,7 @@ function renderRail(){
   view.ondrop=function(e){ railDrop(e); };
   try{ if(_railSearchQ) railSearch(_railSearchQ); }catch(e){}
   try{ railFitTable(); }catch(e){}
+  try{ if(Object.keys(slots).length && !built.archived) railPostToScorecard(); }catch(e){}   // keep today's scorecard rail totals in sync with the live view
 }
 
 function switchTab(tab) {
@@ -8460,7 +8464,7 @@ function renderScorecard(){
       <td class="sc-date">${fmtScDate(d)}</td><td>${scWeekNum(d)}</td>
       <td class="sc-calc" title="Auto: Inbound loads marked COMPLETED for this date">${cell(r.trkRecv)}</td>
       <td class="sc-calc" title="Auto: Actually Placed from the Rail tab import for this date — not manually editable">${cell(r.railRecv)}</td>
-      <td class="sc-calc" title="Auto: Constructively Placed from the Rail tab import for this date — not manually editable">${cell(r.pendRail)}</td>
+      <td class="sc-calc" title="Auto: Constructively Placed + Ordered (Ordered = in the yard) from the Rail tab import for this date — not manually editable">${cell(r.pendRail)}</td>
       <td class="sc-calc" title="Auto: In Transit from the Rail tab import for this date — not manually editable">${cell(r.railTransit)}</td>
       ${(scBoard().fftiFromYard && d===today)
         ? `<td class="sc-calc" title="Auto: live FFTI trailers on the yard doors">${cell(r.ffti)}</td>`
