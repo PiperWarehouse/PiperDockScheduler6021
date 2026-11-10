@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-156';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807156;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-157';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807157;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -3989,7 +3989,7 @@ const RAIL_DEFAULT_STATUS = [
   { data:'OB', report:'RELEASED' }, { data:'PL', report:'ORDERED' }, { data:'CP', report:'CONSTRUCTIVELY PLACED' },
   { data:'AP', report:'ACTUALLY PLACED' }, { data:'BLANK/ENROUTE/OFFLINE', report:'IN TRANSIT' }
 ];
-function railNormCar(s){ return String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,''); }
+function railNormCar(s){ let v=String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,''); v=v.replace(/^([A-Z]*)0+(\d)/,'$1$2'); return v; }   // collapse zero-padding on the number (SRY 9287 == SRY 009287) so the same car isn't counted twice
 function railNormCom(s){ return String(s==null?'':s).toUpperCase().replace(/\s+/g,' ').trim(); }
 function railFmtTime(ts){ try{ return new Date(ts).toLocaleString([], {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } }
 // Commodity-fixed origins — these commodities always ship from a known plant, so force the origin.
