@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-157';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807157;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-160';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807160;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4016,6 +4016,9 @@ function railCommodityMap(){
   const src=(state.refTable && Array.isArray(state.refTable.railCommodity) && state.refTable.railCommodity.length) ? state.refTable.railCommodity : RAIL_DEFAULT_COMMODITY;
   const m={}; src.forEach(x=>{ const c=railNormCom(x.commodity); if(!c) return; m[c]={ customer:String(x.customer||'').toUpperCase().trim(), warehouse:String(x.warehouse||'').trim() }; });
   if(!m['PAPER GRND WOOD']) m['PAPER GRND WOOD']={ customer:'CATALYST', warehouse:'6021' };   // always decipher Paper Grnd Wood as Catalyst, even if an imported map omits the row
+  if(!m['BEVERAGE FRUIT']) m['BEVERAGE FRUIT']={ customer:'ELECTROLIT', warehouse:'6049' };   // Electrolit (Waco) — diverted to 6021, included via the ELECTROLIT warehouse exception in railBuild
+  if(!m['BEVERAGE,FLVD'])  m['BEVERAGE,FLVD'] ={ customer:'ELECTROLIT', warehouse:'6049' };   // Electrolit (La Junta)
+  if(!m['BEVERAGE FLVD'])  m['BEVERAGE FLVD'] ={ customer:'ELECTROLIT', warehouse:'6049' };
   return m;
 }
 function railStatusMap(){
@@ -4054,14 +4057,14 @@ function railParseRows(type, idx, rows){
   const out=[];
   const mk=row=>(name=>{ const i=idx[name]; return i==null?'':String(row[i]==null?'':row[i]).trim(); });
   rows.forEach(row=>{ if(!row || !row.length) return; const g=mk(row);
-    let carRaw, commodity, originCity, originState, destRaw;
+    let carRaw, commodity, originCity, originState, destRaw, blockTo='';
     if(type==='equip'){ carRaw=g('EQUIPMENT'); commodity=g('STCC DESCRIPTION'); originCity=g('ORIGIN CITY'); originState=g('ORIGIN STATE'); destRaw=g('DESTINATION CITY')||g('DESTINATION'); }
-    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; destRaw=g('DESTINATION CITY')||g('DESTINATION'); }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
+    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; destRaw=g('DESTINATION CITY')||g('DESTINATION'); blockTo=g('BLOCK TO'); }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
     else { carRaw=g('UNIT ID'); commodity=''; const og=g('ORIGIN'); const p=og.split(','); originCity=(p[0]||'').trim(); originState=(p[1]||'').trim(); destRaw=g('DESTINATION')||g('DESTINATION CITY'); }
     if(!carRaw) return;
     const _rawCom=railNormCom(commodity); let com=_rawCom, _ds=railRowStatusCode(type,g);
     if(_rawCom==='**EMPTY**'||_rawCom==='EMPTY'){ com=''; _ds='EMPTY'; }   // an empty car has been released
-    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim(), dest:String(destRaw||'').toUpperCase().trim() });
+    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim(), dest:String(destRaw||'').toUpperCase().trim(), blockTo:String(blockTo||'').toUpperCase().trim() });
   });
   return out;
 }
@@ -4182,7 +4185,11 @@ function railBuild(){
     let cm = commodity ? comMap[commodity] : null;
     if(!cm){ let _sh=''; for(const r of recs){ if(r.shipper){ _sh=r.shipper; break; } } cm = railShipperCM(_sh, comMap); }   // WestRock QTS pipeline cars have no commodity — map by shipper
     if(!cm){ unmapped++; return; }                               // no commodity match → can't decipher, don't apply
-    if(String(cm.warehouse)!==RAIL_WAREHOUSE){ otherWh++; return; }   // deciphered to another warehouse → don't apply
+    if(cm.customer==='ELECTROLIT'){
+      // ELECTROLIT cars are diverted to the 6021 location, but only count the ones on the Omni report — and skip any the Omni report blocks to PIPWAR FUL (column F = "Block To"), which is 6049 track (data sometimes skews).
+      const _omni=recs.find(r=>r.rt==='placement');
+      if(!_omni || String(_omni.blockTo||'').replace(/\s+/g,'').indexOf('PIPWARFUL')>-1){ otherWh++; return; }
+    } else if(String(cm.warehouse)!==RAIL_WAREHOUSE){ otherWh++; return; }   // deciphered to another warehouse → don't apply
     let originCity='', originState='';
     for(const r of recs){ if(r.commodity && r.originCity){ originCity=r.originCity; originState=r.originState; break; } }
     if(!originCity) for(const r of recs){ if(r.originCity){ originCity=r.originCity; originState=r.originState; break; } }
