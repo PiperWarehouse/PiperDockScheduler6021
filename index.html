@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-160';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807160;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-163';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807163;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4047,24 +4047,30 @@ function railRowStatusCode(type, g){
     if(_lc==='FULCO' && _ls==='GA') return 'CP';
     return ''; }   // everything else (OFFLINE/ENROUTE transit, Waybill Data Reported, etc.) stays IN TRANSIT
   if(type==='placement'){ const ai=g('AI').toUpperCase().trim();
-    // Column AD ("AI") carries the OB/PL/CP/AP data-status code directly (OB=Released, PL=Ordered, CP=Constructively Placed, AP=Actually Placed).
-    if(ai==='OB'||ai==='PL'||ai==='CP'||ai==='AP') return ai;
+    const _hasPiplog = /PIPLOG\/\s*\d/.test(g('ONLINE DESTINATION').toUpperCase());   // col AF = a requested door#
+    // Column AD ("AI"): OB/CP/AP are taken directly. PL (Ordered) is only trusted when col AF ALSO carries a PIPLOG/<door#> — a bare PL with no door is stale, so defer to the real Placement Status (col AG).
+    if(ai==='OB'||ai==='CP'||ai==='AP') return ai;
+    if(ai==='PL' && _hasPiplog) return 'PL';
     const ps=g('PLACEMENT STATUS').toUpperCase();
-    return ps==='RELEASED'?'OB' : ps==='ACTUALLY PLACED'?'AP' : ps==='CONSTRUCTIVELY PLACED'?'CP' : ps==='ORDERED'?'PL' : ''; }
+    const _base = ps==='RELEASED'?'OB' : ps==='ACTUALLY PLACED'?'AP' : ps==='CONSTRUCTIVELY PLACED'?'CP' : ps==='ORDERED'?'PL' : '';
+    if(_base) return _base;
+    // A PIPLOG/<door#> in Online Destination (col AF) means ordered to that door → Ordered, even when AI/Placement Status are blank.
+    if(_hasPiplog) return 'PL';
+    return ''; }
   return '';   // pipeline CLM events are all in-transit movements toward Fulco
 }
 function railParseRows(type, idx, rows){
   const out=[];
   const mk=row=>(name=>{ const i=idx[name]; return i==null?'':String(row[i]==null?'':row[i]).trim(); });
   rows.forEach(row=>{ if(!row || !row.length) return; const g=mk(row);
-    let carRaw, commodity, originCity, originState, destRaw, blockTo='';
+    let carRaw, commodity, originCity, originState, destRaw, blockTo='', piplog=false;
     if(type==='equip'){ carRaw=g('EQUIPMENT'); commodity=g('STCC DESCRIPTION'); originCity=g('ORIGIN CITY'); originState=g('ORIGIN STATE'); destRaw=g('DESTINATION CITY')||g('DESTINATION'); }
-    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; destRaw=g('DESTINATION CITY')||g('DESTINATION'); blockTo=g('BLOCK TO'); }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
+    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; destRaw=g('DESTINATION CITY')||g('DESTINATION'); blockTo=g('BLOCK TO'); piplog=/PIPLOG\/\s*\d/.test(g('ONLINE DESTINATION').toUpperCase()); }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
     else { carRaw=g('UNIT ID'); commodity=''; const og=g('ORIGIN'); const p=og.split(','); originCity=(p[0]||'').trim(); originState=(p[1]||'').trim(); destRaw=g('DESTINATION')||g('DESTINATION CITY'); }
     if(!carRaw) return;
     const _rawCom=railNormCom(commodity); let com=_rawCom, _ds=railRowStatusCode(type,g);
     if(_rawCom==='**EMPTY**'||_rawCom==='EMPTY'){ com=''; _ds='EMPTY'; }   // an empty car has been released
-    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim(), dest:String(destRaw||'').toUpperCase().trim(), blockTo:String(blockTo||'').toUpperCase().trim() });
+    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim(), dest:String(destRaw||'').toUpperCase().trim(), blockTo:String(blockTo||'').toUpperCase().trim(), piplog:!!piplog });
   });
   return out;
 }
@@ -4197,6 +4203,8 @@ function railBuild(){
     recs.forEach(r=>{ const b=stMap[String(r.ds||'').toUpperCase()] || stMap['']; const rk=RAIL_RANK[b]||0; if(rk>bestRank){ bestRank=rk; best=b; } });
     let manual=false; const _ov=state.railStatusOverride && state.railStatusOverride[car];
     if(_ov && _ov.status && RAIL_RANK[_ov.status]){ best=_ov.status; manual=true; }   // manual override wins (reports lag)
+    // PIPLOG door orders hold at Ordered: a door has been requested on the Omni report, so keep the car Ordered even when CSX would promote it to Constructively Placed (or drop it as Released/empty). Actually Placed (physically at the door) and a manual override still win.
+    if(!manual && best!=='ACTUALLY PLACED' && recs.some(r=>r.rt==='placement' && r.piplog)){ best='ORDERED'; }
     if(best==='RELEASED'){ excludedReleased++; return; }   // Released cars are excluded from the Rail view entirely
     // IN TRANSIT is authoritative only on the CSX Report — a car that is In Transit but not on CSX is excluded.
     if(best==='IN TRANSIT' && !manual && !recs.some(r=>r.rt==='equip' || r.rt==='pipeline')){ excludedTransit++; return; }   // In Transit valid on CSX or WRK QTS; Omni-only excluded
