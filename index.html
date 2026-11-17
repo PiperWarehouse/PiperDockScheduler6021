@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-163';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807163;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-165';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807165;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4051,7 +4051,9 @@ function railRowStatusCode(type, g){
     // Column AD ("AI"): OB/CP/AP are taken directly. PL (Ordered) is only trusted when col AF ALSO carries a PIPLOG/<door#> — a bare PL with no door is stale, so defer to the real Placement Status (col AG).
     if(ai==='OB'||ai==='CP'||ai==='AP') return ai;
     if(ai==='PL' && _hasPiplog) return 'PL';
+    if(ai==='PL') return 'CP';   // a PL with no 6PIPLOG/<door#> is a stale Ordered — the car is Constructively Placed
     const ps=g('PLACEMENT STATUS').toUpperCase();
+    if(ai==='TR' && ps==='ACTUALLY PLACED') return 'AP';   // a TR (transit) AI with Placement Status (col AG) = Actually Placed is actually placed
     const _base = ps==='RELEASED'?'OB' : ps==='ACTUALLY PLACED'?'AP' : ps==='CONSTRUCTIVELY PLACED'?'CP' : ps==='ORDERED'?'PL' : '';
     if(_base) return _base;
     // A PIPLOG/<door#> in Online Destination (col AF) means ordered to that door → Ordered, even when AI/Placement Status are blank.
