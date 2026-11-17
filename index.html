@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-165';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807165;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-169';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807169;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -701,31 +701,77 @@ function fmtTime(s) {
   return s;
 }
 function calcDuration(t1, t2) {
-  if (!t1 || !t2) return '—';
-  const [h1,m1] = t1.split(':').map(Number);
-  const [h2,m2] = t2.split(':').map(Number);
-  let diff = (h2*60+m2) - (h1*60+m1);
+  const a=_tmin(t1), b=_tmin(t2); if(a==null||b==null) return '—';
+  let diff = b - a;
   if (diff < 0) diff += 1440;
   const h = Math.floor(diff/60), m = diff%60;
   return (h>0?h+'h ':'')+m+'m';
 }
 function arrivalStatus(appt, timeIn) {
-  if (!appt || !timeIn) return '';
-  const [h1,m1] = appt.split(':').map(Number);
-  const [h2,m2] = timeIn.split(':').map(Number);
-  const diff = (h2*60+m2)-(h1*60+m1);
+  const a=_tmin(appt), b=_tmin(timeIn); if(a==null||b==null) return '';
+  const diff = b-a;
   if (diff < 0)  return '<span class="arr-early">Early</span>';
   if (diff < 15) return '<span class="arr-ontime">On Time</span>';
   return '<span class="arr-late">Late</span>';
 }
 
 function calcVariance(appt, timeIn) {
-  if (!appt || !timeIn) return null;
-  const [h1,m1] = appt.split(':').map(Number);
-  const [h2,m2] = timeIn.split(':').map(Number);
-  const diff = (h2*60+m2)-(h1*60+m1);
-  return diff;
+  const a=_tmin(appt), b=_tmin(timeIn); if(a==null||b==null) return null;
+  return b-a;
 }
+
+// Accept a time typed 24-hour (14:05) or regular (2:05). With no AM/PM, hours 1–7 are assumed PM
+// (we don't work overnight), so "2:05" against a 2:00 PM appt stores as 14:05. Explicit AM/PM wins;
+// unparseable input is left as typed so the operator can see and fix it.
+function normTime(s){
+  if(s==null) return '';
+  let v=String(s).trim().toUpperCase().replace(/\./g,'');
+  if(!v) return '';
+  let mer=''; const mm=v.match(/([AP])M?$/);
+  if(mm){ mer=mm[1]; v=v.slice(0,mm.index).trim(); }
+  let h,m; const dm=v.match(/^(\d{1,2}):(\d{2})$/);
+  if(dm){ h=+dm[1]; m=+dm[2]; }
+  else { const d=v.replace(/\D/g,''); if(!d) return String(s);
+    if(d.length<=2){ h=+d; m=0; } else if(d.length===3){ h=+d.slice(0,1); m=+d.slice(1); } else { h=+d.slice(0,2); m=+d.slice(2,4); } }
+  if(isNaN(h)||isNaN(m)||h>23||m>59) return String(s);
+  let h24; if(mer==='P'){ h24=(h%12)+12; } else if(mer==='A'){ h24=h%12; } else if(h>=1 && h<=7){ h24=h+12; } else { h24=h; }   // no AM/PM → 1–7 PM, else as typed
+  const rh=((h24+11)%12)+1;   // 12-hour hour for display — we keep REGULAR format, never 24-hour
+  const reg=rh+':'+('0'+m).slice(-2);
+  const defH24=(rh>=1&&rh<=7)?rh+12:rh;   // how _tmin reads a bare regular time (1–7 → PM, else as-is)
+  return (defH24===h24) ? reg : reg+(h24>=12?' PM':' AM');   // suffix only for the odd early-AM / late-PM case
+}
+// Minutes since midnight, honoring an explicit AM/PM or the 1–7→PM default (used by variance/duration).
+function _tmin(s){
+  if(!s) return null;
+  let v=String(s).trim().toUpperCase().replace(/\./g,'');
+  let mer=''; const mm=v.match(/([AP])M?$/); if(mm){ mer=mm[1]; v=v.slice(0,mm.index).trim(); }
+  const p=v.split(':'); let h=+p[0], m=+(p[1]||0);
+  if(isNaN(h)||isNaN(m)) return null;
+  if(mer==='P'){ h=(h%12)+12; } else if(mer==='A'){ h=h%12; } else if(h>=1 && h<=7){ h+=12; }
+  return h*60+m;
+}
+// One-time: reformat existing stored Time In/Out to the regular format so they don't have to be redone by hand.
+function migrateTimesOnce(){
+  try{
+    if(!(state.user && state.user.role==='admin')) return;
+    if(state._timeMigrated || state._timeMigrating) return;
+    if(!state.inbound || !state.outbound) return;
+    state._timeMigrating=true;
+    db.ref(ROOT+'/migrations/timeNormPM').once('value').then(function(snap){
+      if(snap.val()){ state._timeMigrated=true; state._timeMigrating=false; return; }
+      const upd={}; let n=0;
+      ['inbound','outbound'].forEach(function(coll){ const data=state[coll]||{};
+        Object.keys(data).forEach(function(id){ const r=data[id]||{};
+          ['timeIn','timeOut'].forEach(function(f){ const cur=r[f]; if(cur==null||cur==='') return;
+            const nv=normTime(cur); if(nv && nv!==cur){ upd[coll+'/'+id+'/'+f]=nv; n++; } }); }); });
+      upd['migrations/timeNormPM']={ at:Date.now(), by:(state.user&&state.user.label)||'', count:n };
+      db.ref(ROOT).update(upd).then(function(){ state._timeMigrated=true; state._timeMigrating=false;
+        if(n && typeof showAlert==='function') showAlert('Reformatted '+n+' existing time'+(n===1?'':'s')+'.','success'); })
+        .catch(function(e){ state._timeMigrating=false; console.warn('time migration',e); });
+    }).catch(function(e){ state._timeMigrating=false; console.warn('time migration flag',e); });
+  }catch(e){ state._timeMigrating=false; console.warn('migrateTimesOnce',e); }
+}
+
 
 // Clock
 function updateClock() {
@@ -3936,6 +3982,72 @@ function _restoreView(v){
   ['ibDate','obDate','ffDate','pwdDate','dtDate','igDate','scMonth'].forEach(function(k){ if(v[k]) state[k]=v[k]; });
   if(v.tab){ var btn=document.getElementById('tab-'+v.tab); if(btn && btn.style.display!=='none') switchTab(v.tab); }
 }
+// ─── Date-range export (Inbound / Outbound) ───────────────────────────────────
+// Reads the stored loads directly (not the single-day DOM table) so several days export at
+// once, with the board date stamped on every line. Presets (prior/current week, prior month) + ad-hoc.
+function _expIso(x){ return x.getFullYear()+'-'+('0'+(x.getMonth()+1)).slice(-2)+'-'+('0'+x.getDate()).slice(-2); }
+function _rangePreset(which){
+  const d=new Date(); d.setHours(12,0,0,0);
+  const dow=(d.getDay()+6)%7;   // 0=Mon … 6=Sun
+  if(which==='curweek'){ const mon=new Date(d); mon.setDate(d.getDate()-dow); const sun=new Date(mon); sun.setDate(mon.getDate()+6); return [_expIso(mon),_expIso(sun)]; }
+  if(which==='priorweek'){ const mon=new Date(d); mon.setDate(d.getDate()-dow-7); const sun=new Date(mon); sun.setDate(mon.getDate()+6); return [_expIso(mon),_expIso(sun)]; }
+  if(which==='priormonth'){ const first=new Date(d.getFullYear(), d.getMonth()-1, 1); const last=new Date(d.getFullYear(), d.getMonth(), 0); return [_expIso(first),_expIso(last)]; }
+  if(which==='lastworkday'){ const w=new Date(d); do{ w.setDate(w.getDate()-1); }while(w.getDay()===0||w.getDay()===6); return [_expIso(w),_expIso(w)]; }   // prior business day (skips weekends)
+  return [_expIso(d),_expIso(d)];
+}
+function openRangeExport(type){
+  const title=(type==='ib'?'Inbound':'Outbound')+' — Export date range';
+  const cw=_rangePreset('curweek');
+  const esc=s=>String(s==null?'':s).replace(/"/g,'&quot;');
+  document.getElementById('modal-container').innerHTML=`
+    <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+      <div class="modal" style="width:min(470px,96vw)">
+        <h2 style="margin:0 0 3px">${esc(title)}</h2>
+        <p style="color:var(--text2);font-size:12px;margin:0 0 14px">Pick a preset or set a custom range, then export. Every row includes its board date.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+          <button class="sign-out-btn" onclick="_rangeSet('lastworkday')">Last work day</button>
+          <button class="sign-out-btn" onclick="_rangeSet('priorweek')">Prior week</button>
+          <button class="sign-out-btn" onclick="_rangeSet('curweek')">Current week</button>
+          <button class="sign-out-btn" onclick="_rangeSet('priormonth')">Prior month</button>
+        </div>
+        <div style="display:flex;gap:14px;align-items:center;margin-bottom:18px;font-size:13px;color:var(--text2)">
+          <label style="display:inline-flex;align-items:center;gap:6px">From <input type="date" id="rng-from" value="${cw[0]}" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text)"></label>
+          <label style="display:inline-flex;align-items:center;gap:6px">To <input type="date" id="rng-to" value="${cw[1]}" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text)"></label>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button class="sign-out-btn" onclick="closeModal()">Cancel</button>
+          <button class="sign-out-btn" style="background:#166534;color:#fff;border-color:#166534" onclick="_rangeGo('${type}')">⤓ Export</button>
+        </div>
+      </div>
+    </div>`;
+}
+function _rangeSet(which){ const r=_rangePreset(which); const f=document.getElementById('rng-from'), t=document.getElementById('rng-to'); if(f)f.value=r[0]; if(t)t.value=r[1]; }
+function _rangeGo(type){ const f=(document.getElementById('rng-from')||{}).value, t=(document.getElementById('rng-to')||{}).value; if(!f||!t){ showAlert('Pick both dates.'); return; } closeModal(); exportRangeToExcel(type,f,t); }
+function exportRangeToExcel(type, from, to){
+  try{
+    if(typeof XLSX==='undefined'){ showAlert('Excel library not loaded.'); return; }
+    if(!from||!to){ showAlert('Pick a date range.'); return; }
+    if(from>to){ const tmp=from; from=to; to=tmp; }
+    const coll = type==='ib' ? (state.inbound||{}) : (state.outbound||{});
+    const rows = Object.values(coll)
+      .filter(r=>{ const d=(r.reqDate||'').slice(0,10); return d && d>=from && d<=to; })
+      .sort((a,b)=> String((a.reqDate||'').slice(0,10)).localeCompare(String((b.reqDate||'').slice(0,10))) || String(a.apptTime||'99:99').localeCompare(String(b.apptTime||'99:99')) || String(a.customer||'').localeCompare(String(b.customer||'')));
+    if(!rows.length){ showAlert('No '+(type==='ib'?'inbound':'outbound')+' loads between '+from+' and '+to+'.'); return; }
+    let aoa;
+    if(type==='ib'){
+      aoa=[['Date','Status','Customer','Load #','Appt','Time In','Time Out','Variance','Duration','Door','Unloader','Trailer','Carrier','Phone','Notes']];
+      rows.forEach(r=>{ const v=calcVariance(r.apptTime,r.timeIn); const vt=v===null?'':(v===0?'On Time':(v>0?('+'+v+'m'):(v+'m')));
+        aoa.push([(r.reqDate||'').slice(0,10), (IB_LABELS[r.status]||r.status||''), r.customer||'', r.loadNum||'', fmtApptLabel(r.apptTime)||'', r.timeIn||'', r.timeOut||'', vt, calcDuration(r.timeIn,r.timeOut)||'', r.door||'', r.unloader||'', r.trailer||'', r.carrier||'', r.phone||'', r.notes||'']); });
+    } else {
+      aoa=[['Date','Status','Customer','Order #','Destination','Appt','Time In','Time Out','Duration','Door','Picker','Loader','Trailer','Carrier','Phone','Priority','Paperwork','Night PU','Notes']];
+      rows.forEach(r=>{ aoa.push([(r.reqDate||'').slice(0,10), (OB_LABELS[r.status]||r.status||''), r.customer||'', r.orderNum||'', r.destination||'', fmtApptLabel(r.apptTime)||'', r.timeIn||'', r.timeOut||'', calcDuration(r.timeIn,r.timeOut)||'', r.door||'', r.picker||'', r.loader||'', r.trailer||'', r.carrier||'', r.phone||'', (r.priority?'Y':''), (r.paperwork?'Y':''), (r.nightPU?'Y':''), r.notes||'']); });
+    }
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols']=aoa[0].map((h,i)=> i===0?{wch:12} : (h==='Notes'||h==='Destination')?{wch:26}:{wch:14});
+    const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, (type==='ib'?'Inbound':'Outbound'));
+    XLSX.writeFile(wb, RAIL_WAREHOUSE+'_'+(type==='ib'?'Inbound':'Outbound')+'_'+from+'_to_'+to+'.xlsx');
+  }catch(e){ showAlert('Export failed: '+((e&&e.message)||e)); }
+}
 // Export the currently-shown board (the visible table in a view) to an .xlsx for reporting.
 // Reads live input/select values, keeps the on-screen columns/rows, and writes section labels.
 function exportViewToExcel(viewId, label){
@@ -4630,8 +4742,8 @@ function cycleIBStatus(id) {
   const idx = IB_STATUSES.indexOf(curr);
   const next = IB_STATUSES[(idx+1)%IB_STATUSES.length];
   const updates = {status: next};
-  if(next==='ARRIVED'  && !rec.timeIn)  updates.timeIn  = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
-  if(next==='COMPLETED' && !rec.timeOut) updates.timeOut = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
+  if(next==='ARRIVED'  && !rec.timeIn)  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='COMPLETED' && !rec.timeOut) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
   db.ref(ROOT+'/inbound/'+id).update(updates);
 }
 
@@ -4647,8 +4759,8 @@ function cycleOBStatus(id) {
   const idx = OB_STATUSES.indexOf(curr);
   const next = OB_STATUSES[(idx+1)%OB_STATUSES.length];
   const updates = {status: next};
-  if(next==='LOADING'  && !rec.timeIn)  updates.timeIn  = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
-  if(next==='DEPARTED' && !rec.timeOut) updates.timeOut = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
+  if(next==='LOADING'  && !rec.timeIn)  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='DEPARTED' && !rec.timeOut) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
   db.ref(ROOT+'/outbound/'+id).update(updates);
 }
 
@@ -4672,6 +4784,7 @@ function keepScroll(view) {
 function renderInbound() {
   const view = document.getElementById('view-ib');
   keepScroll(view);
+  try{ migrateTimesOnce(); }catch(e){}
   const ibRollToggle = state.rollMode.ib ? '' : "<button class=\"roll-toggle\" onclick=\"enterRollMode('ib')\">ROLL LOADS</button>";
   const ibRollBar = state.rollMode.ib ? `
   <div class="roll-bar">
@@ -4804,6 +4917,7 @@ function renderInbound() {
     ${ibSearching?`<button class="today-btn" onclick="clearIbSearch()">Clear</button>`:''}
     <button class="add-load-btn ib-btn" onclick="showAddLoad('ib')">＋ Add Inbound Load</button>
     <button class="today-btn" title="Export the current view to Excel" onclick="exportViewToExcel('view-ib','6021_Inbound')" style="background:#166534;color:#fff;border-color:#166534">⤓ Excel</button>
+    <button class="today-btn" title="Export a date range to Excel (prior/current week, prior month, or custom)" onclick="openRangeExport('ib')" style="background:#0f5132;color:#fff;border-color:#0f5132">⤓ Range</button>
     ${ibRollToggle}
   </div>
   ${ibRollBar}
@@ -4849,6 +4963,7 @@ function renderInbound() {
 function renderOutbound() {
   const view = document.getElementById('view-ob');
   keepScroll(view);
+  try{ migrateTimesOnce(); }catch(e){}
   const obRollToggle = state.rollMode.ob ? '' : "<button class=\"roll-toggle\" onclick=\"enterRollMode('ob')\">ROLL LOADS</button>";
   const obRollBar = state.rollMode.ob ? `
   <div class="roll-bar">
@@ -5003,6 +5118,7 @@ function renderOutbound() {
     ${obSearching?`<button class="today-btn" onclick="clearObSearch()">Clear</button>`:''}
     <button class="add-load-btn ob-btn" onclick="showAddLoad('ob')">＋ Add Outbound Load</button>
     <button class="today-btn" title="Export the current view to Excel" onclick="exportViewToExcel('view-ob','6021_Outbound')" style="background:#166534;color:#fff;border-color:#166534">⤓ Excel</button>
+    <button class="today-btn" title="Export a date range to Excel (prior/current week, prior month, or custom)" onclick="openRangeExport('ob')" style="background:#0f5132;color:#fff;border-color:#0f5132">⤓ Range</button>
     <button class="roll-toggle" onclick="toggleObFlags()" title="${state.obFlagsHidden?'Show':'Hide'} the Pri / Paper / Night check boxes — flagged loads keep their badge either way">${state.obFlagsHidden?'\u25B8':'\u25BE'} FLAGS</button>
     <button class="roll-toggle" onclick="toggleObAppt()" title="${state.obApptHidden?'Show':'Hide'} the Appt, Time In, Time Out, Duration and Arr columns">${state.obApptHidden?'\u25B8':'\u25BE'} APPT / TIMES</button>
     ${obRollToggle}
@@ -7007,7 +7123,7 @@ function resolveDoorLoadsAndSave(num) {
   const pending = window._pendingDoorSave;
   if (!pending || pending.num!==num) { closeModal(); return; }
   const holders = yardDoorHolders(num);
-  const nowT = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
+  const nowT = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
   const jobs = holders.map(h => {
     const coll = h.srcKey==='ib' ? 'inbound' : 'outbound';
     const rec = (state[coll]||{})[h.id] || {};
@@ -7108,6 +7224,7 @@ function _revertActiveBoard(){
   } catch(e){}
 }
 function saveField(type, id, field, value) {
+  if (field==='timeIn' || field==='timeOut') value = normTime(value);   // 2:05 → 14:05 (assume PM for 1–7, accept 24hr/AM/PM)
   const path = type==='ib'?'inbound':type==='ob'?'outbound':type==='firstfleet'?'firstfleet':'outbound';
   // Capture prior status BEFORE any write so the LOADED/DEPARTED notification transition is never missed.
   const _prevStatus = (path==='outbound' && field==='status') ? (((state.outbound||{})[id])||{}).status : null;
