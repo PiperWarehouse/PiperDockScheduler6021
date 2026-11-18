@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-169';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807169;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-170';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807170;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4177,14 +4177,14 @@ function railParseRows(type, idx, rows){
   const out=[];
   const mk=row=>(name=>{ const i=idx[name]; return i==null?'':String(row[i]==null?'':row[i]).trim(); });
   rows.forEach(row=>{ if(!row || !row.length) return; const g=mk(row);
-    let carRaw, commodity, originCity, originState, destRaw, blockTo='', piplog=false;
+    let carRaw, commodity, originCity, originState, destRaw, blockTo='', piplog=false, track='';
     if(type==='equip'){ carRaw=g('EQUIPMENT'); commodity=g('STCC DESCRIPTION'); originCity=g('ORIGIN CITY'); originState=g('ORIGIN STATE'); destRaw=g('DESTINATION CITY')||g('DESTINATION'); }
-    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; destRaw=g('DESTINATION CITY')||g('DESTINATION'); blockTo=g('BLOCK TO'); piplog=/PIPLOG\/\s*\d/.test(g('ONLINE DESTINATION').toUpperCase()); }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
+    else if(type==='placement'){ carRaw=g('EQUIPMENT'); commodity=g('COMMODITY'); originCity=''; originState=''; destRaw=g('DESTINATION CITY')||g('DESTINATION'); blockTo=g('BLOCK TO'); piplog=/PIPLOG\/\s*\d/.test(g('ONLINE DESTINATION').toUpperCase()); track=g('TRACK'); }   // export "Origin City" is the Fulco switch point, not the true origin — take origin from Equipment List / Pipeline instead
     else { carRaw=g('UNIT ID'); commodity=''; const og=g('ORIGIN'); const p=og.split(','); originCity=(p[0]||'').trim(); originState=(p[1]||'').trim(); destRaw=g('DESTINATION')||g('DESTINATION CITY'); }
     if(!carRaw) return;
     const _rawCom=railNormCom(commodity); let com=_rawCom, _ds=railRowStatusCode(type,g);
     if(_rawCom==='**EMPTY**'||_rawCom==='EMPTY'){ com=''; _ds='EMPTY'; }   // an empty car has been released
-    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim(), dest:String(destRaw||'').toUpperCase().trim(), blockTo:String(blockTo||'').toUpperCase().trim(), piplog:!!piplog });
+    out.push({ car:railNormCar(carRaw), carRaw:String(carRaw).trim(), commodity:com, originCity:String(originCity||'').toUpperCase().trim(), originState:String(originState||'').toUpperCase().trim(), ds:_ds, rt:type, shipper:String(g('SHIPPER')||'').toUpperCase().trim(), dest:String(destRaw||'').toUpperCase().trim(), blockTo:String(blockTo||'').toUpperCase().trim(), piplog:!!piplog, track:String(track||'').toUpperCase().trim() });
   });
   return out;
 }
@@ -4297,10 +4297,11 @@ function railBuild(){
   ['equip','placement','pipeline'].forEach(t=>{ const s=slots[t]; if(s && Array.isArray(s.records)) s.records.forEach(r=>all.push(r)); });
   const comMap=railCommodityMap(), stMap=railStatusMap();
   const byCar={}; all.forEach(r=>{ if(!r.car) return; (byCar[r.car]=byCar[r.car]||[]).push(r); });
-  const pivot={}; let mapped=0, unmapped=0, otherWh=0, excludedTransit=0, excludedReleased=0, excludedDest=0;
+  const pivot={}; let mapped=0, unmapped=0, otherWh=0, excludedTransit=0, excludedReleased=0, excludedDest=0, excludedTrack=0;
   Object.keys(byCar).forEach(car=>{
     const recs=byCar[car];
     if(recs.some(r=>String(r.dest||'').indexOf('INDIANAPOLIS')>-1)){ excludedDest++; return; }   // exclude cars whose destination is Indianapolis
+    if(recs.some(r=>r.rt==='placement' && String(r.track||'').indexOf('PIPWAR')>-1)){ excludedTrack++; return; }   // Omni Track (col C) PIPWAR = 6049 — not a 6021 car, remove it
     let commodity=''; for(const r of recs){ if(r.commodity){ commodity=r.commodity; break; } }
     let cm = commodity ? comMap[commodity] : null;
     if(!cm){ let _sh=''; for(const r of recs){ if(r.shipper){ _sh=r.shipper; break; } } cm = railShipperCM(_sh, comMap); }   // WestRock QTS pipeline cars have no commodity — map by shipper
@@ -4337,7 +4338,7 @@ function railBuild(){
   });
   const rows=Object.values(pivot).sort((a,b)=> a.customer.localeCompare(b.customer) || a.origin.localeCompare(b.origin));
   rows.forEach((r,i)=>r._i=i);
-  return { rows, mapped, unmapped, otherWh, excludedTransit, excludedReleased, excludedDest };
+  return { rows, mapped, unmapped, otherWh, excludedTransit, excludedReleased, excludedDest, excludedTrack };
 }
 // Drill-down: list the individual cars behind a clicked count cell (per-row or a column/grand total).
 let _railBuilt=null;
@@ -4567,7 +4568,7 @@ function renderRail(){
     </style>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
       <h2 style="margin:0;font-size:17px">🚆 Rail · Placement View <span style="font-size:11px;color:var(--text2);font-weight:600">warehouse ${RAIL_WAREHOUSE}</span></h2>
-      ${built.rows.length?`<span style="font-size:11px;color:var(--text2)">${built.mapped} cars for this warehouse${built.otherWh?(' · '+built.otherWh+' other-warehouse'):''}${built.unmapped?(' · '+built.unmapped+' unmatched commodity'):''}${built.excludedTransit?(' · '+built.excludedTransit+' in-transit not on CSX'):''}${built.excludedReleased?(' · '+built.excludedReleased+' released (excluded)'):''}${built.excludedDest?(' · '+built.excludedDest+' Indianapolis (excluded)'):''}</span>`:''}
+      ${built.rows.length?`<span style="font-size:11px;color:var(--text2)">${built.mapped} cars for this warehouse${built.otherWh?(' · '+built.otherWh+' other-warehouse'):''}${built.unmapped?(' · '+built.unmapped+' unmatched commodity'):''}${built.excludedTransit?(' · '+built.excludedTransit+' in-transit not on CSX'):''}${built.excludedReleased?(' · '+built.excludedReleased+' released (excluded)'):''}${built.excludedDest?(' · '+built.excludedDest+' Indianapolis (excluded)'):''}${built.excludedTrack?(' · '+built.excludedTrack+' 6049 track (excluded)'):''}</span>`:''}
       <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center">
         ${(()=>{ const ds=Object.keys(state.railArchive||{}).sort().reverse(); return `<select onchange="railViewDateSet(this.value)" title="View a past daily snapshot" style="font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text)"><option value=""${!state.railViewDate?' selected':''}>● Live view</option>${ds.map(d=>`<option value="${d}"${state.railViewDate===d?' selected':''}>📁 ${d}</option>`).join('')}</select>`; })()}
         ${admin?`<button class="sign-out-btn" onclick="railArchiveNow()" style="font-size:12px" title="Freeze this view as the daily snapshot (ET)">📸 Snapshot</button>`:''}
