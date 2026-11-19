@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-170';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807170;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-172';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807172;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4743,15 +4743,15 @@ function cycleIBStatus(id) {
   const idx = IB_STATUSES.indexOf(curr);
   const next = IB_STATUSES[(idx+1)%IB_STATUSES.length];
   const updates = {status: next};
-  if(next==='ARRIVED'  && !rec.timeIn)  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
-  if(next==='COMPLETED' && !rec.timeOut) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='ARRIVED'  && !rec.timeIn && !isDropHook(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='COMPLETED' && !rec.timeOut && !isDropHook(rec)) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
   db.ref(ROOT+'/inbound/'+id).update(updates);
 }
 
 // ─── OUTBOUND STATUS ───────────────────────────────────────────────────
-const OB_STATUSES = ['ORDER RECEIVED','PICK TICKET','BEING PICKED','PICKED & STAGED','LOADING','LOADED','CANCELLED','DEPARTED'];
-const OB_CLASSES  = {'ORDER RECEIVED':'s-order-recv','PICK TICKET':'s-pick-ticket','BEING PICKED':'s-being-picked','PICKED & STAGED':'s-picked-staged','LOADING':'s-loading','LOADED':'s-loaded','CANCELLED':'s-cancelled','DEPARTED':'s-departed'};
-const OB_LABELS   = {'ORDER RECEIVED':'Order Received','PICK TICKET':'Pick Ticket','BEING PICKED':'Being Picked','PICKED & STAGED':'Picked & Staged','LOADING':'Loading','LOADED':'Loaded','CANCELLED':'Cancelled','DEPARTED':'Departed'};
+const OB_STATUSES = ['ORDER RECEIVED','PICK TICKET','BEING PICKED','PICKED & STAGED','ARRIVED','LOADING','LOADED','CANCELLED','DEPARTED'];
+const OB_CLASSES  = {'ORDER RECEIVED':'s-order-recv','PICK TICKET':'s-pick-ticket','BEING PICKED':'s-being-picked','PICKED & STAGED':'s-picked-staged','ARRIVED':'s-arrived','LOADING':'s-loading','LOADED':'s-loaded','CANCELLED':'s-cancelled','DEPARTED':'s-departed'};
+const OB_LABELS   = {'ORDER RECEIVED':'Order Received','PICK TICKET':'Pick Ticket','BEING PICKED':'Being Picked','PICKED & STAGED':'Picked & Staged','ARRIVED':'Arrived','LOADING':'Loading','LOADED':'Loaded','CANCELLED':'Cancelled','DEPARTED':'Departed'};
 
 function cycleOBStatus(id) {
   const rec = state.outbound[id];
@@ -4760,8 +4760,9 @@ function cycleOBStatus(id) {
   const idx = OB_STATUSES.indexOf(curr);
   const next = OB_STATUSES[(idx+1)%OB_STATUSES.length];
   const updates = {status: next};
-  if(next==='LOADING'  && !rec.timeIn)  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
-  if(next==='DEPARTED' && !rec.timeOut) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='ARRIVED'  && !rec.timeIn && !isDropHook(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='LOADING'  && !rec.timeIn && !isDropHook(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='DEPARTED' && !rec.timeOut && !isDropHook(rec)) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
   db.ref(ROOT+'/outbound/'+id).update(updates);
 }
 
@@ -5002,7 +5003,7 @@ function renderOutbound() {
       const isPF = r.sourceType==='pickflow';
       const obOpts = OB_STATUSES.map(s=>`<option value="${s}" ${r.status===s?'selected':''}>${OB_LABELS[s]}</option>`).join('');
       const obArrBadge = arrivalStatus(r.apptTime, r.timeIn);
-      const obStatusColor = {'ORDER RECEIVED':'#111','PICK TICKET':'#880044','BEING PICKED':'#333','PICKED & STAGED':'#1a5c30','LOADING':'#333','LOADED':'#1a3a6b','CANCELLED':'#b91c1c','DEPARTED':'#4a2500'}[r.status]||'#111';
+      const obStatusColor = {'ORDER RECEIVED':'#111','PICK TICKET':'#880044','BEING PICKED':'#333','PICKED & STAGED':'#1a5c30','ARRIVED':'#0b6aa3','LOADING':'#333','LOADED':'#1a3a6b','CANCELLED':'#b91c1c','DEPARTED':'#4a2500'}[r.status]||'#111';
       const obRollCell = state.rollMode.ob ? `<td style="text-align:center"><input type="checkbox" class="roll-check" ${rollSel.has(id)?'checked':''} onclick="toggleRollSel('ob','${id}',this)"></td>` : '';
       const obIsRolled = isRolled(r);
       const obOrig = (r.origReqDate||r.reqDate||'').slice(0,10);
@@ -7237,6 +7238,17 @@ function saveField(type, id, field, value) {
   }
   db.ref(ROOT+'/'+path+'/'+id+'/'+field).set(value)
     .catch(e=>console.warn('Field save error',e));
+  // Auto-stamp Time In when a load is marked ARRIVED (inbound or outbound), and Time Out when it's
+  // COMPLETED (inbound) / DEPARTED (outbound). Only fills a blank cell — never overwrites a manual time.
+  if (field==='status' && (path==='inbound' || path==='outbound') && !isDropHook((state[path]||{})[id]||{})) {   // auto-stamps skip Drop & Hook loads
+    try {
+      const _r = (state[path]||{})[id] || {};
+      const _nowT = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+      const _v = (value||'').toUpperCase();
+      if (_v==='ARRIVED' && !_r.timeIn) db.ref(ROOT+'/'+path+'/'+id+'/timeIn').set(_nowT).catch(()=>{});
+      if (((path==='inbound' && _v==='COMPLETED') || (path==='outbound' && _v==='DEPARTED')) && !_r.timeOut) db.ref(ROOT+'/'+path+'/'+id+'/timeOut').set(_nowT).catch(()=>{});
+    } catch(e){}
+  }
   if (path==='outbound' && field==='status' && value==='DEPARTED') {
     // A departed load stays on the day it shipped. If auto-roll pushed it ahead to a future
     // day, pull it back to today (the actual departure day); same-day / past left as-is.
