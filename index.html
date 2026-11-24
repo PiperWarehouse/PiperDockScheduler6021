@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-172';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807172;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-174';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807174;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4039,8 +4039,8 @@ function exportRangeToExcel(type, from, to){
       rows.forEach(r=>{ const v=calcVariance(r.apptTime,r.timeIn); const vt=v===null?'':(v===0?'On Time':(v>0?('+'+v+'m'):(v+'m')));
         aoa.push([(r.reqDate||'').slice(0,10), (IB_LABELS[r.status]||r.status||''), r.customer||'', r.loadNum||'', fmtApptLabel(r.apptTime)||'', r.timeIn||'', r.timeOut||'', vt, calcDuration(r.timeIn,r.timeOut)||'', r.door||'', r.unloader||'', r.trailer||'', r.carrier||'', r.phone||'', r.notes||'']); });
     } else {
-      aoa=[['Date','Status','Customer','Order #','Destination','Appt','Time In','Time Out','Duration','Door','Picker','Loader','Trailer','Carrier','Phone','Priority','Paperwork','Night PU','Notes']];
-      rows.forEach(r=>{ aoa.push([(r.reqDate||'').slice(0,10), (OB_LABELS[r.status]||r.status||''), r.customer||'', r.orderNum||'', r.destination||'', fmtApptLabel(r.apptTime)||'', r.timeIn||'', r.timeOut||'', calcDuration(r.timeIn,r.timeOut)||'', r.door||'', r.picker||'', r.loader||'', r.trailer||'', r.carrier||'', r.phone||'', (r.priority?'Y':''), (r.paperwork?'Y':''), (r.nightPU?'Y':''), r.notes||'']); });
+      aoa=[['Date','Status','Customer','Order #','Destination','Appt','Time In','Time Out','Variance','Duration','Door','Picker','Loader','Trailer','Carrier','Phone','Priority','Paperwork','Night PU','Notes']];
+      rows.forEach(r=>{ const ov=calcVariance(r.apptTime,r.timeIn); const ovt=ov===null?'':(ov===0?'On Time':(ov>0?('+'+ov+'m'):(ov+'m'))); aoa.push([(r.reqDate||'').slice(0,10), (OB_LABELS[r.status]||r.status||''), r.customer||'', r.orderNum||'', r.destination||'', fmtApptLabel(r.apptTime)||'', r.timeIn||'', r.timeOut||'', ovt, calcDuration(r.timeIn,r.timeOut)||'', r.door||'', r.picker||'', r.loader||'', r.trailer||'', r.carrier||'', r.phone||'', (r.priority?'Y':''), (r.paperwork?'Y':''), (r.nightPU?'Y':''), r.notes||'']); });
     }
     const ws=XLSX.utils.aoa_to_sheet(aoa);
     ws['!cols']=aoa[0].map((h,i)=> i===0?{wch:12} : (h==='Notes'||h==='Destination')?{wch:26}:{wch:14});
@@ -4678,6 +4678,7 @@ function apptOptions(coll, date, selected, excludeId, allowDropHook) {
 }
 // A load counts as "drop & hook" if it's explicitly set that way, or it's an FFTI load with no appointment.
 function isDropHook(r){ return r && (r.apptTime===DROPHOOK_VAL || ((r.apptTime||'')==='' && (r.carrier||'').toUpperCase()==='FFTI')); }
+function isDropHookAppt(r){ return !!(r && r.apptTime===DROPHOOK_VAL); }   // ONLY an explicit Drop & Hook appointment (not the FFTI/no-appt heuristic) — used to decide whether to skip the auto time-stamps
 // Effective appointment label for a load (shows Drop & Hook for FFTI/no-appt loads).
 function effApptLabel(r){ return isDropHook(r) ? 'Drop & Hook' : fmtApptLabel(r.apptTime); }
 // The Appt-Time value to pre-select when opening the edit form for a load.
@@ -4743,8 +4744,8 @@ function cycleIBStatus(id) {
   const idx = IB_STATUSES.indexOf(curr);
   const next = IB_STATUSES[(idx+1)%IB_STATUSES.length];
   const updates = {status: next};
-  if(next==='ARRIVED'  && !rec.timeIn && !isDropHook(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
-  if(next==='COMPLETED' && !rec.timeOut && !isDropHook(rec)) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='ARRIVED'  && !rec.timeIn && !isDropHookAppt(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='COMPLETED' && !rec.timeOut && !isDropHookAppt(rec)) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
   db.ref(ROOT+'/inbound/'+id).update(updates);
 }
 
@@ -4760,9 +4761,9 @@ function cycleOBStatus(id) {
   const idx = OB_STATUSES.indexOf(curr);
   const next = OB_STATUSES[(idx+1)%OB_STATUSES.length];
   const updates = {status: next};
-  if(next==='ARRIVED'  && !rec.timeIn && !isDropHook(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
-  if(next==='LOADING'  && !rec.timeIn && !isDropHook(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
-  if(next==='DEPARTED' && !rec.timeOut && !isDropHook(rec)) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='ARRIVED'  && !rec.timeIn && !isDropHookAppt(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='LOADING'  && !rec.timeIn && !isDropHookAppt(rec))  updates.timeIn  = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
+  if(next==='DEPARTED' && !rec.timeOut && !isDropHookAppt(rec)) updates.timeOut = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
   db.ref(ROOT+'/outbound/'+id).update(updates);
 }
 
@@ -5000,6 +5001,9 @@ function renderOutbound() {
   const obDups = dupNumMap(state.outbound, 'orderNum');   // order #s appearing on 2+ active loads
   const obBookedRow = (id, r) => {
       const dur = calcDuration(r.timeIn, r.timeOut);
+      const obVarMin = calcVariance(r.apptTime, r.timeIn);
+      const obVarTxt = obVarMin===null ? '—' : obVarMin===0 ? 'On Time' : obVarMin>0 ? `+${obVarMin}m` : `${obVarMin}m`;
+      const obVarCls = obVarMin===null||obVarMin===0 ? '' : obVarMin>15 ? 'variance-neg' : obVarMin<0 ? 'variance-pos' : '';
       const isPF = r.sourceType==='pickflow';
       const obOpts = OB_STATUSES.map(s=>`<option value="${s}" ${r.status===s?'selected':''}>${OB_LABELS[s]}</option>`).join('');
       const obArrBadge = arrivalStatus(r.apptTime, r.timeIn);
@@ -5043,6 +5047,7 @@ function renderOutbound() {
             onchange="saveField('ob','${id}','timeOut',this.value)"
             onblur="saveField('ob','${id}','timeOut',this.value)">
         </td>
+        <td class="${obVarCls}">${obVarTxt}</td>
         <td>${dur}</td>
         <td style="min-width:60px">${obArrBadge}</td>
         `:''}
@@ -5060,13 +5065,13 @@ function renderOutbound() {
         </td>
       </tr>`;
   };
-  const obCols = (state.rollMode.ob?1:0) + (obFlagsShown()?22:19) - (obApptShown()?0:5);
+  const obCols = (state.rollMode.ob?1:0) + (obFlagsShown()?23:20) - (obApptShown()?0:6);
   const obOpenRow = (label, bookArg) => `<tr class="ib-open-row">${state.rollMode.ob?'<td></td>':''}
         ${obFlagsShown()?'<td></td><td></td><td></td>':''}
         <td><span class="ib-open-badge">OPEN</span></td>
         <td><a class="book-link" onclick="showAddLoad('ob','${bookArg}')">+ Book</a></td>
         <td></td><td></td><td></td>
-        ${obApptShown()?`<td style="min-width:70px"><span class="ib-open-appt">${label}</span></td><td></td><td></td><td></td><td></td>`:''}
+        ${obApptShown()?`<td style="min-width:70px"><span class="ib-open-appt">${label}</span></td><td></td><td></td><td></td><td></td><td></td>`:''}
         <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
       </tr>`;
 
@@ -5156,6 +5161,7 @@ function renderOutbound() {
         ${thS('Appt','ob','apptTime')}
         ${thS('Time In','ob','timeIn')}
         ${thS('Time Out','ob','timeOut')}
+        <th>Variance</th>
         <th>Duration</th>
         <th>Arr</th>
         `:''}
@@ -7240,7 +7246,7 @@ function saveField(type, id, field, value) {
     .catch(e=>console.warn('Field save error',e));
   // Auto-stamp Time In when a load is marked ARRIVED (inbound or outbound), and Time Out when it's
   // COMPLETED (inbound) / DEPARTED (outbound). Only fills a blank cell — never overwrites a manual time.
-  if (field==='status' && (path==='inbound' || path==='outbound') && !isDropHook((state[path]||{})[id]||{})) {   // auto-stamps skip Drop & Hook loads
+  if (field==='status' && (path==='inbound' || path==='outbound') && !isDropHookAppt((state[path]||{})[id]||{})) {   // auto-stamps skip Drop & Hook loads
     try {
       const _r = (state[path]||{})[id] || {};
       const _nowT = normTime(new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}));
