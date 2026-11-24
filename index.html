@@ -597,8 +597,8 @@ const ROOT = 'dockSchedule/6021';
 // Build stamp — BUMP THIS STRING ON EVERY DEPLOY (e.g. add -2, -3, or a new date). It shows in the
 // header and is readable in the console as APP_VERSION, so you can tell at a glance which build any
 // device is running. An old build won't have the header chip at all, which itself flags a stale tab.
-const APP_VERSION = 'v2026.08.07-174';   // human-readable; shown in the header chip
-const APP_BUILD   = 20260807174;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
+const APP_VERSION = 'v2026.08.07-176';   // human-readable; shown in the header chip
+const APP_BUILD   = 20260807176;       // MONOTONIC build number — MUST strictly increase every deploy; drives the auto-update
 
 // ─── STATE ─────────────────────────────────────────────────────────────
 const state = {
@@ -4305,6 +4305,8 @@ function railBuild(){
     let commodity=''; for(const r of recs){ if(r.commodity){ commodity=r.commodity; break; } }
     let cm = commodity ? comMap[commodity] : null;
     if(!cm){ let _sh=''; for(const r of recs){ if(r.shipper){ _sh=r.shipper; break; } } cm = railShipperCM(_sh, comMap); }   // WestRock QTS pipeline cars have no commodity — map by shipper
+    // Wrapping Paper from Canadian Kraft on the CSX report is IPG (6021) — commodity AND shipper are the key drivers.
+    if(recs.some(r=>r.rt==='equip' && String(r.commodity||'').indexOf('WRAPPING PAPER')>-1 && String(r.shipper||'').indexOf('CANADIAN KRAFT')>-1)){ cm={ customer:'IPG', warehouse:'6021' }; }
     if(!cm){ unmapped++; return; }                               // no commodity match → can't decipher, don't apply
     if(cm.customer==='ELECTROLIT'){
       // ELECTROLIT cars are diverted to the 6021 location, but only count the ones on the Omni report — and skip any the Omni report blocks to PIPWAR FUL (column F = "Block To"), which is 6049 track (data sometimes skews).
